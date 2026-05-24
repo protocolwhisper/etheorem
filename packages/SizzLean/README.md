@@ -179,4 +179,26 @@ see [`MANUAL.md`](MANUAL.md).
 
 ## Requiring this package
 
-TODO: publication URL.
+`SizzLean` lives as a subpackage of the [`etheorem` umbrella
+repository](https://github.com/etheorem/etheorem). To depend on it
+from another Lake project, add a `[[require]]` block to your
+`lakefile.toml`:
+
+```toml
+[[require]]
+name = "SizzLean"
+git = "https://github.com/etheorem/etheorem"
+subDir = "packages/SizzLean"
+rev = "main"  # pin to a specific commit hash for reproducible builds
+```
+
+Then run `lake update` to refresh `lake-manifest.json`. Per the
+umbrella's [`CLAUDE.md`](../../CLAUDE.md) dependency policy, prefer
+pinning `rev` to a specific commit hash over tracking a branch once
+you've validated a working pair — branch-tracking turns every
+upstream change into a silent dep bump.
+
+`SizzLean`'s only build-time dependency outside Lean core is the
+sibling [`LeanSha256`](../LeanSha256) subpackage in the same umbrella;
+adding the `[[require]]` above transitively pulls it in via the
+umbrella's `lake-manifest.json`.
