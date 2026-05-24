@@ -10,78 +10,107 @@ on:
         default: '1'
         required: false
 
+# CI structure mirrors `just` — every step that has a corresponding
+# Justfile recipe goes through `just <recipe>`, so local-dev and CI
+# can't drift on what they actually run. Adding or renaming a recipe
+# updates both sides at once. The only steps that don't go through
+# `just` are toolchain installers (elan, uv, python, the `just`
+# binary itself) and the `actions/cache` declaration, which is a
+# GitHub Actions concern with no local-dev analogue.
+
 jobs:
-  build:
+  lint:
+    # Forbidden-token check on committed Lean source — no Lean
+    # toolchain needed, just `git grep`. Runs in ~5 s.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - name: Lint Lean sources (sorry / #eval / #check / #print)
+        run: just lint
+
+  test:
+    # In-Lean property tests: SHA-256 NIST CAVP vectors, SSZ library
+    # gates (hasher equivalence, Merkle PRNG, cache machinery on
+    # example containers), and LeanEthCS compile-time validation
+    # (every `deriving SSZRepr` is a build-time gate). All three
+    # fire as `native_decide` examples via `lake build`. The library
+    # itself is built transitively as a dependency, so this job
+    # subsumes the previous standalone build gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: extractions/setup-just@v3
+      - name: Verify build-time native deps
+        # See `conformance` job below for the rationale.
+        run: just doctor-native
       # Pinned to the commit `v1` resolves to as of 2026-05-10. Bump deliberately.
       - uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9
-
-  forbidden-tokens:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: Reject sorry / #eval / #check / #print in committed Lean
-        # `git grep` searches tracked files only and returns 1 when no matches —
-        # avoids `xargs -r grep`'s empty-input ambiguity (which exits 0).
-        run: |
-          set -euo pipefail
-          if git grep -nE '(\bsorry\b|^[[:space:]]*#(eval|check|print)\b)' -- '*.lean'; then
-            echo "::error::Forbidden token found in committed Lean source (CLAUDE.md)."
-            exit 1
-          fi
+        with:
+          lake-package-directory: '.'
+      - name: Unit tests
+        run: just test
 
   conformance:
     # Stage 14a/b acceptance: passes upstream consensus-specs vectors.
-    # Default subset (--limit 1) is the smoke gate that keeps CI under ~15 min;
-    # workflow_dispatch with `conformance_limit: all` runs the full sweep.
+    # Smoke gate (`--limit 1` on each suite, mainnet preset, ~30 s wall-
+    # clock) runs on every push / pull_request. `workflow_dispatch` with
+    # `conformance_limit: all` upgrades to the full sweep
+    # (`just official-ssz-vector-tests-all`).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
+      - uses: extractions/setup-just@v3
+      - uses: astral-sh/setup-uv@v3
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
-      - name: Install Python dependencies
-        run: pip install -r scripts/requirements.txt
-
       - name: Cache consensus-spec-tests archives
         # Cache only the .tar.gz files (~490 MB for mainnet + general);
-        # the extracted trees (~4 GB total) re-build on each run via the
-        # `ensure_archive` path in run_conformance.py — extraction is
-        # ~1 min, much cheaper than the GitHub-side cache transfer would be.
-        # Keyed on the tag baked into the script — bumping
-        # `DEFAULT_TAG` invalidates and the cache repopulates.
+        # the extracted trees (~4 GB total) re-build on each run via
+        # `ensure_archive` in run_conformance.py — extraction is ~1 min,
+        # much cheaper than the GitHub-side cache transfer would be.
+        # Keyed on `DEFAULT_TAG`; bumping it invalidates and the cache
+        # repopulates on first run.
         uses: actions/cache@v4
         with:
           path: ~/.cache/sizzlean/v1.6.0-beta.0-*.tar.gz
           key: consensus-spec-tests-v1.6.0-beta.0-archives
 
+      - name: Verify build-time native deps
+        # `just doctor-native` probes pkg-config + libcrypto (the
+        # native deps `lakefile.lean` consumes via `pkg-config --libs
+        # libcrypto`) and prints actionable platform install hints if
+        # anything is missing. Runs *before* lean-action so a missing
+        # OpenSSL surfaces here (~1 s) rather than as a cryptic linker
+        # error 30 s into `lake build`. Uses the `-native` variant
+        # (not full `just doctor`) because the Lean toolchain isn't
+        # installed yet at this point — lean-action does that next.
+        run: just doctor-native
+
       - uses: leanprover/lean-action@38fbc41a8c28c4cbaec22d7f7de508ec2e7c0dd9
         with:
-          # `lean-action` builds Lake's targets by default; we need
-          # `eth_ssz_vector_runner` (the LeanEthCS CLI the conformance
-          # script drives via batch protocol) plus the SizzLean library
-          # itself, which builds transitively as a dependency.
           lake-package-directory: '.'
+          # Build the CLI the conformance harness drives via batch
+          # protocol. The SizzLean library + LeanEthCS compile
+          # transitively as its dependencies, so they don't need
+          # naming here.
           build-args: 'eth_ssz_vector_runner'
 
-      - name: Run conformance suite (mainnet preset, subset)
-        # Mainnet preset is the green gate — `ssz_static --config
-        # mainnet --all` passes 1585 / 1585, and the `--limit 1` smoke
-        # below is a few hundred cases. The minimal-preset sweep is
-        # currently blocked by a LeanEthCS-side gap (per-preset
-        # container constants aren't preset-aware — most visibly the
-        # `KZG_COMMITMENT_INCLUSION_PROOF_DEPTH` mainnet/minimal split
-        # producing a 224-byte schema mismatch on `BlobSidecar` and
-        # derivatives). Bring minimal back here once that's addressed.
+      - name: Install Python dependencies
+        run: just setup-python
+
+      - name: Run conformance suite
+        # Mainnet preset is the green gate today; minimal-preset full
+        # sweep is blocked by a LeanEthCS-side gap (per-preset container
+        # constants — see `just official-ssz-vector-tests-static-minimal`
+        # comment in `Justfile`).
         run: |
           set -euo pipefail
           LIMIT='${{ github.event.inputs.conformance_limit || '1' }}'
           if [ "$LIMIT" = "all" ]; then
-            python3 scripts/run_conformance.py --suite all --config mainnet --all
+            just official-ssz-vector-tests-all
           else
-            python3 scripts/run_conformance.py --suite all --config mainnet --limit "$LIMIT"
+            just official-ssz-vector-tests-smoke
           fi

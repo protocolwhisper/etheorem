@@ -140,13 +140,64 @@ contract.
 
 ## Dependencies
 
-* `LeanSha256` — pure-Lean SHA-256 reference (used by the kernel-
-  reducible `Hasher.Sha256Spec` instance).
-* OpenSSL `libcrypto.so.3` — system library, linked via FFI for the
-  production `Hasher.Sha256` instance.
+### Lean-level
 
-The FFI shim (`csrc/sha256_shim.c`) is built procedurally by Lake;
-`lakefile.lean` (not `lakefile.toml`) is required for this.
+* `LeanSha256` — sibling subpackage, pure-Lean SHA-256 reference
+  (used by the kernel-reducible `Hasher.Sha256Spec` instance).
+  Pulled in transitively via the umbrella's
+  [`lake-manifest.json`](../../lake-manifest.json).
+
+### System-level (build-time native deps)
+
+The production `Hasher.Sha256` instance is an FFI shim
+(`csrc/sha256_shim.c`) that links to **OpenSSL 3.x**. Lake
+discovers the right link flags via `pkg-config --libs libcrypto`
+at build time, so the same `lake build` works on Debian/Ubuntu
+multiarch, Fedora `/usr/lib64`, Arch, Alpine, macOS Homebrew
+(where `openssl@3` is keg-only), and NixOS store paths — pkg-
+config does the platform discrimination for us. If `pkg-config`
+itself isn't installed, the build falls back to the hardcoded
+Debian-multiarch values, which keeps existing `apt`-only
+environments working.
+
+You need two system packages:
+
+* **OpenSSL 3.x development files** — both the shared library
+  (`libcrypto.so.3` / `libcrypto.3.dylib` / …) and the headers
+  (`<openssl/evp.h>`).
+* **`pkg-config`** — the canonical Unix discovery tool the build
+  uses to find the above.
+
+| Platform | One-liner |
+|---|---|
+| Debian / Ubuntu | `sudo apt install libssl-dev pkg-config` |
+| Fedora / RHEL   | `sudo dnf install openssl-devel pkgconf-pkg-config` |
+| Arch            | `sudo pacman -S openssl pkgconf` |
+| Alpine          | `sudo apk add openssl-dev pkgconf` |
+| macOS (Homebrew) | `brew install openssl@3 pkg-config` |
+| NixOS           | add `openssl pkg-config` to your `shell.nix` / `flake.nix` |
+
+To verify your machine is set up — both system deps and the Lean
+toolchain — run from the umbrella root:
+
+```bash
+just doctor         # checks pkg-config + OpenSSL + elan/lake/lean + uv/python3
+just doctor-native  # checks only pkg-config + OpenSSL (the CI gate)
+```
+
+`just doctor` prints actionable platform-specific install hints if
+anything's missing. The CI `test` and `conformance` jobs run
+`just doctor-native` as their first step.
+
+### Why a procedural lakefile
+
+The FFI shim build (`csrc/sha256_shim.c` + `csrc/sha256_batch.c`)
+needs a `target … : FilePath := do …` step that the declarative
+`lakefile.toml` syntax can't express. The procedural `lakefile.lean`
+also hosts the `pkg-config` discovery (a `BaseIO` call at lakefile-
+load time via `unsafeBaseIO`); both reasons keep this subpackage on
+`lakefile.lean` even though the umbrella and the two sibling
+subpackages stay on declarative TOML.
 
 ## Module overview
 
@@ -166,8 +217,16 @@ The FFI shim (`csrc/sha256_shim.c`) is built procedurally by Lake;
 ## Build / test
 
 ```bash
+just doctor                 # one-time sanity check on a fresh machine
 lake build SizzLean         # compile the library
 ```
+
+`just doctor` is the first thing to run on a new clone — it verifies
+OpenSSL 3.x and `pkg-config` are present (the build-time native deps
+the FFI shim links against, see [Dependencies](#dependencies)) plus
+the Lean toolchain (elan / lake / lean) and the Python harness
+toolchain (python3 / uv) used by the conformance recipes below. A
+failed check prints the install command for your platform.
 
 Three test surfaces, all driven from the umbrella `just` interface
 at the repo root. The first two are quick; the third runs against
@@ -187,10 +246,13 @@ just test-sha256
 # against the official archives. A tqdm progress bar shows live
 # per-case throughput. Quick sample:
 just official-ssz-vector-tests
-# Full generic sweep (1865 cases, a couple of minutes):
+# Full `ssz_generic` sweep (~2188 in-scope cases, a couple of
+# seconds — 292 progressive-container cases are out of scope):
 just official-ssz-vector-tests-generic-full
-# Full static sweep (38991 cases, minimal preset, all forks Phase 0 → Fulu):
+# Full `ssz_static` sweep on mainnet preset (1585 cases, ~2 min):
 just official-ssz-vector-tests-static-full
+# Full upstream corpus: generic + static-full on mainnet preset:
+just official-ssz-vector-tests-all
 ```
 
 For the full menu, the protocol the harness uses, and how to

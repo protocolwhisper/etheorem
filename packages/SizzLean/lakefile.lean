@@ -34,10 +34,68 @@ unsafe def globsUnder
         out := out.push (.one (Lean.Name.str rootName stem))
     return out
 
+/-- Hardcoded Debian/Ubuntu fallback. Used when `pkg-config` itself
+isn't installed (rare on Linux distros, common on minimal Docker
+images). The Linux-only `-l:libcrypto.so.3` GNU-ld syntax and the
+multiarch `-L/usr/lib/x86_64-linux-gnu` path are deliberately the
+last-resort values — when `pkg-config` is available it produces
+portable equivalents for Fedora, Arch, macOS Homebrew, Nix, etc. -/
+private def opensslFallbackLinkArgs : Array String :=
+  #["-L/usr/lib/x86_64-linux-gnu", "-l:libcrypto.so.3"]
+
+/-- Helper: run `pkg-config <args>` at lakefile-load time and return
+its stdout split on whitespace. Returns `fallback` if pkg-config
+isn't installed, exits non-zero, or returns an empty result. -/
+unsafe def runPkgConfig (args : Array String)
+    (fallback : Array String) : Array String :=
+  Id.run <| unsafeBaseIO do
+    let result ← (IO.Process.output { cmd := "pkg-config", args }).toBaseIO
+    match result with
+    | .ok r =>
+        if r.exitCode == 0 then
+          let out := r.stdout.trim
+          if out.isEmpty then return fallback
+          return (out.splitOn " ").toArray.filter (fun a => !a.isEmpty)
+        else
+          return fallback
+    | .error _ => return fallback
+
+/-- OpenSSL link args via `pkg-config`. We *always* prepend an
+explicit `-L<libdir>` from `pkg-config --variable=libdir libcrypto`
+even when `pkg-config --libs` omits it: the Lean toolchain bundles
+its own `lld` whose default library search path does **not** include
+the system's standard locations (`/usr/lib`, `/usr/lib/x86_64-linux-gnu`,
+`/usr/lib64`, …), so an unqualified `-lcrypto` fails with
+`unable to find library -lcrypto` even though `libcrypto.so` is
+where the system would expect. The explicit `-L` makes the location
+unambiguous to Lean's `lld`.
+
+On Debian/Ubuntu `pkg-config --variable=libdir libcrypto` returns
+`/usr/lib/x86_64-linux-gnu`; on Fedora `/usr/lib64`; on macOS
+Homebrew `/opt/homebrew/opt/openssl@3/lib`; on Nix the store path.
+All transparent to this code — pkg-config does the platform
+discrimination for us. -/
+unsafe def opensslLinkArgs : Array String :=
+  let libDir := runPkgConfig #["--variable=libdir", "libcrypto"] #[]
+  let libs   := runPkgConfig #["--libs",            "libcrypto"]
+                  opensslFallbackLinkArgs
+  let libDirFlags := libDir.map (fun d => "-L" ++ d)
+  libDirFlags ++ libs
+
+/-- OpenSSL `-I<dir>` flags via `pkg-config --cflags libcrypto`,
+appended to `cShimFlags` so the C shims find `<openssl/evp.h>`.
+On Debian / Ubuntu the headers live at `/usr/include` and no
+explicit `-I` is needed; on macOS Homebrew openssl@3 is keg-only
+and the `.pc` file's `-I/opt/homebrew/opt/openssl@3/include` is
+load-bearing. Empty fallback keeps Debian working when pkg-config
+is missing. -/
+unsafe def opensslCFlags : Array String :=
+  runPkgConfig #["--cflags", "libcrypto"] #[]
+
 package SizzLean where
-  moreLinkArgs := #[
-    "-L/usr/lib/x86_64-linux-gnu",
-    "-l:libcrypto.so.3"]
+  -- Discovered at lakefile-load time via `pkg-config --libs libcrypto`;
+  -- see `opensslLinkArgs` above for the rationale and the fallback.
+  moreLinkArgs := unsafe opensslLinkArgs
   -- Lake's leanc default is already `-O3 -DNDEBUG -fPIC` with the
   -- usual hardening flags. We add `-march=native` so the host's
   -- AVX2/AVX-512/SHA-NI extensions are visible to the Lean→C path —
@@ -60,9 +118,13 @@ require LeanSha256 from "../LeanSha256"
 -- intrinsics matching the build host. `-march=native` bakes in the
 -- build machine's ISA — fine for local builds and the bench; if we
 -- ever ship a portable binary, switch to `-march=x86-64-v3` (AVX2
--- baseline) or per-arch dispatch.
+-- baseline) or per-arch dispatch. The trailing `opensslCFlags` adds
+-- the `-I<dir>` paths from `pkg-config --cflags libcrypto` so the
+-- shims find `<openssl/evp.h>` on systems (macOS Homebrew, Nix)
+-- where it doesn't live in the compiler's default search path.
 def cShimFlags (leanInclude : FilePath) : Array String :=
   #["-fPIC", "-O3", "-march=native", "-I", leanInclude.toString]
+    ++ (unsafe opensslCFlags)
 
 target sha256_shim.o pkg : FilePath := do
   let src := pkg.dir / "csrc" / "sha256_shim.c"

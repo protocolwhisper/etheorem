@@ -44,6 +44,129 @@ clean:
 # fails, the build fails. Recipes are roughly ordered cheapest first.
 # ─────────────────────────────────────────────────────────────────────────
 
+# Reject committed `sorry`, `#eval`, `#check`, `#print` in Lean source
+# per CLAUDE.md. `git grep` searches tracked files only and returns 1
+# when no matches — avoids `xargs -r grep`'s empty-input ambiguity (which
+# exits 0). The CI `lint` job calls this recipe verbatim.
+# Lint Lean sources for forbidden tokens (sorry / #eval / #check / #print)
+lint:
+    @if git grep -nE '(\bsorry\b|^[[:space:]]*#(eval|check|print)\b)' -- '*.lean'; then \
+        printf "\nForbidden token found in committed Lean source (see lines above).\n" >&2 ; \
+        printf "Per CLAUDE.md: no sorry / #eval / #check / #print in committed code.\n" >&2 ; \
+        exit 1; \
+    fi
+
+# Check the *build-time native* dependencies only: `pkg-config` (used
+# by lakefile.lean to discover OpenSSL link/cflags) + OpenSSL 3.x (the
+# library the SHA-256 FFI shim links to). Designed to run on a fresh
+# CI runner *before* the Lean toolchain action installs elan/lake/lean,
+# so it deliberately ignores those. Local devs usually want the
+# fuller `just doctor` below.
+# Verify build-time native deps (pkg-config + OpenSSL 3.x — for CI)
+doctor-native:
+    #!/usr/bin/env bash
+    set -u
+    fail=0
+    info() { printf "  ok   %s\n"   "$1"; }
+    miss() { printf "  MISS %s\n"   "$1" >&2; fail=1; }
+
+    echo "checking build-time native dependencies"
+    echo
+
+    if command -v pkg-config >/dev/null 2>&1; then
+      info "pkg-config        ($(pkg-config --version))"
+    else
+      miss "pkg-config        (needed to discover OpenSSL link flags at build time)"
+    fi
+
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libcrypto 2>/dev/null; then
+      v=$(pkg-config --modversion libcrypto)
+      info "libcrypto         (${v})"
+      major=${v%%.*}
+      if [ -z "${major}" ] || [ "${major}" -lt 3 ] 2>/dev/null; then
+        miss "libcrypto         < 3.0 — SizzLean expects OpenSSL 3.x"
+      fi
+    else
+      miss "libcrypto         (OpenSSL 3.x development headers + shared library)"
+    fi
+
+    if [ "$fail" -ne 0 ]; then
+      echo
+      echo "Some required build-time deps are missing. Install hints:"
+      case "$(uname -s)" in
+        Linux)
+          if [ -r /etc/os-release ] && grep -qE '^ID(_LIKE)?=.*(debian|ubuntu)' /etc/os-release; then
+            echo "  Debian / Ubuntu : sudo apt install libssl-dev pkg-config"
+          elif [ -r /etc/os-release ] && grep -qE '^ID(_LIKE)?=.*(fedora|rhel|centos)' /etc/os-release; then
+            echo "  Fedora / RHEL   : sudo dnf install openssl-devel pkgconf-pkg-config"
+          elif [ -r /etc/os-release ] && grep -qE '^ID(_LIKE)?=.*arch' /etc/os-release; then
+            echo "  Arch            : sudo pacman -S openssl pkgconf"
+          elif [ -r /etc/os-release ] && grep -qE '^ID(_LIKE)?=.*alpine' /etc/os-release; then
+            echo "  Alpine          : sudo apk add openssl-dev pkgconf"
+          else
+            echo "  Linux           : install OpenSSL 3.x development headers + pkg-config"
+          fi
+          ;;
+        Darwin)
+          echo "  macOS (brew)    : brew install openssl@3 pkg-config"
+          ;;
+        *)
+          echo "  See packages/SizzLean/README.md → Dependencies for non-Linux/macOS setup"
+          ;;
+      esac
+      exit 1
+    fi
+
+    echo
+    echo "build-time native deps OK"
+
+# Verify every dev-time dependency is present: build-time native deps
+# (via `doctor-native`) plus the Lean toolchain (elan/lake/lean) and
+# the Python harness toolchain (python3/uv). Prints actionable
+# platform-specific install hints when something is missing. Local
+# devs should run this; CI uses `doctor-native` instead because
+# lean-action installs the Lean toolchain after the doctor step.
+# Verify all dev-time deps (build-time native + Lean toolchain + Python)
+doctor: doctor-native
+    #!/usr/bin/env bash
+    set -u
+    fail=0
+    info() { printf "  ok   %s\n"   "$1"; }
+    warn() { printf "  WARN %s\n"   "$1" >&2; }
+    miss() { printf "  MISS %s\n"   "$1" >&2; fail=1; }
+
+    echo
+    echo "[ Lean toolchain ]"
+    for cmd in elan lake lean; do
+      if command -v "$cmd" >/dev/null 2>&1; then
+        info "$(printf '%-17s' "$cmd") ($("$cmd" --version 2>&1 | head -1))"
+      else
+        miss "$(printf '%-17s' "$cmd") (install via elan: https://elan.lean-lang.org)"
+      fi
+    done
+
+    echo
+    echo "[ conformance harness — only needed for official-ssz-vector-tests* recipes ]"
+    for cmd in python3 uv; do
+      if command -v "$cmd" >/dev/null 2>&1; then
+        info "$(printf '%-17s' "$cmd") ($("$cmd" --version 2>&1 | head -1))"
+      else
+        warn "$(printf '%-17s' "$cmd") (only needed for the conformance harness)"
+      fi
+    done
+
+    if [ "$fail" -ne 0 ]; then
+      echo
+      case "$(uname -s)" in
+        Linux|Darwin) echo "  Lean toolchain  : curl https://elan.lean-lang.org/elan-init.sh -sSf | sh" ;;
+        *) ;;
+      esac
+      exit 1
+    fi
+
+    echo
+    echo "all dev-time deps present"
+
 # All local tests — SHA-256 NIST CAVP + SSZ library gates + LeanEthCS compile-time validation
 test: test-sha256 test-ssz test-eth
 
@@ -64,8 +187,6 @@ test-eth:
 # Microbenchmarks — measure-then-optimise gates for Stage 17
 # ─────────────────────────────────────────────────────────────────────────
 
-# Build + run all SizzLean microbenchmarks; emit one TSV row per
-# measurement column to `packages/SizzLean/bench/<timestamp>.tsv`.
 # Output also prints to stdout so you can pipe / inspect inline.
 #
 # The bench is run from the compiled native binary at
@@ -76,6 +197,7 @@ test-eth:
 # `precompileModules := true` (see `packages/SizzLean/lakefile.lean`)
 # so every imported function is native code; the C shims are built
 # with `-O3 -march=native`.
+# Build + run all SizzLean microbenchmarks; TSV → packages/SizzLean/bench/<timestamp>.tsv
 bench:
     @mkdir -p packages/SizzLean/bench
     @ts=$(date -u +%Y%m%dT%H%M%SZ); \
@@ -83,9 +205,9 @@ bench:
       packages/SizzLean/.lake/build/bin/ssz_bench \
         | tee "packages/SizzLean/bench/$ts.tsv"
 
-# Diff two bench TSVs. Usage: `just bench-diff before.tsv after.tsv`.
 # Aligned column output for readability; falls back to plain diff if
 # `column` is unavailable.
+# Diff two bench TSVs. Usage: `just bench-diff before.tsv after.tsv`
 bench-diff before after:
     @diff -u {{before}} {{after}} | column -t -s $'\t' || diff -u {{before}} {{after}}
 
@@ -108,27 +230,46 @@ bench-diff before after:
 official-ssz-vector-tests:
     .venv/bin/python scripts/run_conformance.py
 
-# Full `ssz_generic` sweep (1865 cases)
+# 292 out-of-scope progressive-container cases are skipped per
+# `Spec/Type.lean`'s deliberate omission of EIP-7495/7916/8016 forms.
+# Full `ssz_generic` sweep (2188 in-scope cases — every wire-format test)
 official-ssz-vector-tests-generic-full:
     .venv/bin/python scripts/run_conformance.py --all
 
-# Quick `ssz_static` sample (2 cases per handler per fork)
+# Quick `ssz_static` sample (mainnet preset, 2 cases per handler per fork)
 official-ssz-vector-tests-static:
     .venv/bin/python scripts/run_conformance.py --suite static --limit 2
 
-# Full `ssz_static` sweep on minimal preset (38991 cases — every fork Phase 0…Fulu)
-official-ssz-vector-tests-static-full:
-    .venv/bin/python scripts/run_conformance.py --suite static --all
+# Matches what the CI `conformance` job runs on every push /
+# pull_request. ~30 s wall-clock once the Lean toolchain is cached.
+# Equivalent to `--suite all --config mainnet --limit 1`.
+# Smoke gate: 1 case per (handler, suite), both suites, mainnet preset
+official-ssz-vector-tests-smoke:
+    .venv/bin/python scripts/run_conformance.py --suite all --config mainnet --limit 1
 
-# Full `ssz_static` sweep on mainnet preset — heavy! (run before a release)
-official-ssz-vector-tests-static-mainnet:
-    .venv/bin/python scripts/run_conformance.py --suite static --preset mainnet --all
+# Default preset for the project; alias is `static-mainnet`.
+# Full `ssz_static` sweep on mainnet preset (1585 cases, Phase 0…Fulu)
+official-ssz-vector-tests-static-full:
+    .venv/bin/python scripts/run_conformance.py --suite static --config mainnet --all
+
+# Alias for the mainnet sweep (kept for explicit-name call sites)
+official-ssz-vector-tests-static-mainnet: official-ssz-vector-tests-static-full
+
+# KNOWN-BROKEN today: the LeanEthCS schemas pin preset constants to
+# mainnet (most visibly `KZG_COMMITMENT_INCLUSION_PROOF_DEPTH = 10`
+# minimal vs `17` mainnet ⇒ a 224-byte schema mismatch on `BlobSidecar`
+# / `BeaconBlockBody` and post-Deneb derivatives — ~1599 failures).
+# Comes back online when LeanEthCS gets per-preset constants. Not a
+# SizzLean-library issue; tracked in LeanEthCS.
+# Full `ssz_static` sweep on minimal preset (KNOWN-BROKEN — see comment)
+official-ssz-vector-tests-static-minimal:
+    .venv/bin/python scripts/run_conformance.py --suite static --config minimal --all
 
 # Focused subset by shape-glob (e.g. `just official-ssz-vector-tests-include 'generic:uints/*'`)
 official-ssz-vector-tests-include PATTERN:
     .venv/bin/python scripts/run_conformance.py --include "{{PATTERN}}"
 
-# Everything from the upstream test corpus: full generic + full static on minimal
+# Everything from the upstream test corpus: full generic + full static on mainnet
 official-ssz-vector-tests-all: official-ssz-vector-tests-generic-full official-ssz-vector-tests-static-full
 
 
