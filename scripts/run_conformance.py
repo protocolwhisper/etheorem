@@ -285,6 +285,21 @@ def walk_generic_cases(extract_root: Path,
 
 # --- ssz_generic case-name → shape-spec parsing ------------------------------
 
+# Container-case prefixes for SSZ forms `SizzLean/Spec/Type.lean` deliberately
+# omits — EIP-7495 `ProgressiveContainer` / `StableContainer`, EIP-7916
+# `ProgressiveList` / `ProgressiveBitlist`, EIP-8016 `CompatibleUnion`. See
+# that file's module docstring for why (no Phase 0 → Gloas consensus type
+# uses them). Upstream `consensus-spec-tests` v1.6.0-beta.0 added test
+# vectors for several of these; we classify them as *out of library scope*
+# rather than failures so the conformance run stays green when upstream
+# extends the corpus beyond what SizzLean's universe covers.
+_OUT_OF_SCOPE_CASE_PREFIXES: Tuple[str, ...] = (
+    "ProgressiveTestStruct",
+    "ProgressiveBitsStruct",
+    # `StableContainer` / `ProgressiveList` / `CompatibleUnion` cases would
+    # plug in here too if upstream ships them under `ssz_generic/containers`.
+)
+
 # Positive shape-prefix patterns. We match the *prefix* of the case name —
 # anything after is variant suffix (e.g. `_zero`, `_random_3`,
 # `_max_one_byte_less`, `_but_2`). Trying to enumerate variant suffixes
@@ -334,6 +349,7 @@ class Stats:
     passed: int = 0
     failed: int = 0
     skipped: int = 0
+    out_of_scope: int = 0
 
 
 def _decompressed_tempfile(case_path: Path, snappy_backend) -> Optional[str]:
@@ -479,8 +495,12 @@ def gather_generic_cases(
     check + per-(handler, valid/invalid) limit, and return the resulting
     list. `stats.skipped` is incremented for cases dropped because the
     handler isn't in `SSZ_GENERIC_HANDLERS` (i.e. the CLI has no
-    dispatch for them) — limit-truncated cases are silently dropped
-    since they're not really "skipped", just trimmed."""
+    dispatch for them). `stats.out_of_scope` is incremented for container
+    cases whose case-name starts with an `_OUT_OF_SCOPE_CASE_PREFIXES`
+    entry — SSZ forms `SizzLean/Spec/Type.lean` deliberately excludes
+    (progressive / stable containers, progressive lists, compatible
+    unions). Limit-truncated cases are silently dropped since they're
+    not really "skipped", just trimmed."""
     out: List[GenericCase] = []
     for fork in FORKS:
         seen: dict[Tuple[str, str], int] = {}
@@ -489,6 +509,9 @@ def gather_generic_cases(
                 continue
             if tc.handler not in SSZ_GENERIC_HANDLERS:
                 stats.skipped += 1
+                continue
+            if tc.case_name.startswith(_OUT_OF_SCOPE_CASE_PREFIXES):
+                stats.out_of_scope += 1
                 continue
             key = (tc.handler, "valid" if tc.is_valid else "invalid")
             if limit is not None and seen.get(key, 0) >= limit:
@@ -640,7 +663,8 @@ def main() -> int:
     # Summary
     print()
     print(f"Result: {stats.passed} passed, {stats.failed} failed, "
-          f"{stats.skipped} skipped (not in CLI dispatch)")
+          f"{stats.skipped} skipped (not in CLI dispatch), "
+          f"{stats.out_of_scope} skipped (out of library scope)")
     if failed:
         print("\nFailures (first 15):")
         for label, msg in failed[:15]:
