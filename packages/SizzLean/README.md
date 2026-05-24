@@ -333,7 +333,10 @@ pinning `rev` to a specific commit hash over tracking a branch once
 you've validated a working pair — branch-tracking turns every
 upstream change into a silent dep bump.
 
-`SizzLean`'s only build-time dependency outside Lean core is the
+SizzLean's only Lean-level dependency outside Lean core is the
 sibling [`LeanSha256`](../LeanSha256) subpackage in the same umbrella;
 adding the `[[require]]` above transitively pulls it in via the
-umbrella's `lake-manifest.json`.
+umbrella's `lake-manifest.json`. The native build-time dependencies
+(OpenSSL 3.x + `pkg-config`, used by the FFI SHA-256 shim) are listed
+under [Dependencies](#dependencies); a stranger building from a clean
+clone needs both the Lean-level `require` *and* those system packages.
