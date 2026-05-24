@@ -213,13 +213,36 @@ as the right sibling for an odd-length tail. The level argument is
 load-bearing for correctness: at level `k`, the phantom right
 sibling of a lone-tail interior node is an all-zero subtree of
 depth `k`, whose root is `ZERO_HASHES[k]` — *not* `zero32` (which
-would be wrong for `k > 0`). -/
-private def combineLayerAt (H : Type) [Hasher H] (lvl : Nat) :
-    List ByteArray → List ByteArray
-  | []           => []
-  | [x]          =>
-      [Hasher.combine (H := H) x (zeroHashAtClamped H lvl)]
-  | x :: y :: rs => Hasher.combine (H := H) x y :: combineLayerAt H lvl rs
+would be wrong for `k > 0`).
+
+The implementation is the tail-recursive accumulator pattern
+(`combineLayerAtAux` builds the result in reverse, the outer
+`combineLayerAt` reverses once at the end). The natural cons-and-
+recurse spelling
+
+```
+| x :: y :: rs => Hasher.combine (H := H) x y :: combineLayerAt H lvl rs
+```
+
+is non-tail-recursive — the recursive call is the *tail* of a
+`cons`, so each step pushes a fresh stack frame holding `combine x
+y` until the list bottoms out. For a `ByteVector[BYTES_PER_BLOB]`
+(131072 bytes ⇒ 4096 chunks) the first layer descends 2048 frames
+deep, which overflows the OS-default 8 MB stack on `BlobSidecar`
+mainnet vectors. The accumulator form keeps the stack flat at the
+cost of one extra `List.reverse` per layer — `O(n)` time, `O(1)`
+stack. -/
+private def combineLayerAtAux (H : Type) [Hasher H] (lvl : Nat) :
+    List ByteArray → List ByteArray → List ByteArray
+  | [],           acc => acc.reverse
+  | [x],          acc =>
+      (Hasher.combine (H := H) x (zeroHashAtClamped H lvl) :: acc).reverse
+  | x :: y :: rs, acc =>
+      combineLayerAtAux H lvl rs (Hasher.combine (H := H) x y :: acc)
+
+private def combineLayerAt (H : Type) [Hasher H] (lvl : Nat)
+    (cs : List ByteArray) : List ByteArray :=
+  combineLayerAtAux H lvl cs []
 
 /-- Promote a single hash up through `remaining` levels of zero
 subtrees: each level pairs with `ZERO_HASHES[startLvl + k]` on the

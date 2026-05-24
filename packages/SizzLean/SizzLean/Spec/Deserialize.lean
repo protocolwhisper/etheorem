@@ -401,21 +401,38 @@ bytes wide, from `b` starting at `off`. Recurses structurally on
 `count : Nat`. The cross-call to `deserialize t` does not change
 `t`, but each iteration's input buffer (extracted slice) is
 strictly smaller — Lean's structural-recursion check on `count`
-suffices for termination here. -/
+suffices for termination here.
+
+The implementation threads an explicit accumulator (`acc`,
+`accSz`, defaulted) so the recursive call sits in tail position;
+the natural
+
+```
+match SSZType.deserializeFixedElems t k b (off + sz) sz with
+| .ok (xs, total)  => .ok (x :: xs, sz + total)
+```
+
+spelling holds `x` and `sz` on the stack across each recursive
+call, which overflows the OS-default 8 MB stack for
+`Vector[uint8, 131072]` (the mainnet `BlobSidecar.blob` field —
+131072 frames). The accumulator form is constant-stack; we
+`List.reverse` the accumulator at the base case, which is itself
+tail-recursive in Lean core. -/
 def SSZType.deserializeFixedElems :
     (t : SSZType) → (count : Nat) → ByteArray → (off elemSize : Nat) →
+    (acc : List t.interp := []) → (accSz : Nat := 0) →
     Except SSZError (List t.interp × Nat)
-  | _, 0,     _, _,   _   => .ok ([], 0)
-  | t, k + 1, b, off, sz  =>
+  | _, 0,     _, _,   _,  acc, accSz =>
+      .ok (acc.reverse, accSz)
+  | t, k + 1, b, off, sz, acc, accSz =>
       let chunk := b.extract off (off + sz)
       match SSZType.deserialize t chunk with
       | .error e        => .error e
       | .ok (x, used)   =>
           if used ≠ sz then .error .trailingBytes
           else
-            match SSZType.deserializeFixedElems t k b (off + sz) sz with
-            | .error e         => .error e
-            | .ok (xs, total)  => .ok (x :: xs, sz + total)
+            SSZType.deserializeFixedElems t k b (off + sz) sz
+              (x :: acc) (accSz + sz)
 
 /-- Read each fixed-size container field in declaration order. The
 result type is `interpFields fs`, definitionally a right-nested
