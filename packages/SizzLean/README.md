@@ -56,6 +56,17 @@ theorems.
   hash-tree-root, and the central correctness theorems — for
   free, per type, with no hand-written proofs.
 
+- **Machine-checked correctness across most of SSZ.** The three
+  central theorems — encode/decode roundtrip, non-malleability,
+  and a schema-derived static size bound — are proved for every
+  SSZ shape *except* the bit-level types and variable-field
+  containers: `uintN 8 / 16 / 32 / 64`, `bool`, fixed-size
+  `vector` and `list`, and `container` over fixed-size fields
+  (recursively). Bit-level types (`bitvector`, `bitlist`) and
+  mixed-field containers are pending — see
+  [Proof coverage](#proof-coverage) for the per-constructor
+  table.
+
 - **Trust assumptions you can grep for.** Every reliance on the
   C SHA-256 implementation is a named Lean `axiom` (or its
   `@[extern] opaque` FFI declaration) in `SizzLean/Hasher/`, and
@@ -76,6 +87,16 @@ theorems.
   intentional, not extra trust commitments. Each real declaration
   is replaceable later by a `@[csimp]`-proved theorem without
   touching a single dependent theorem statement.
+
+  *One additional trust class, auto-injected by tactics rather
+  than hand-written.* The `decode_encode` and
+  `serialize_injective` theorems' `.uintN 16 / 32 / 64` arms close
+  via Lean core's `bv_decide` tactic, which adds one per-theorem
+  `_native.bv_decide.ax_*` axiom (an LRAT SAT certificate cached
+  as a Boolean reduction — same trust class as `native_decide`'s
+  `Lean.ofReduceBool`). Visible via `#print axioms
+  SizzLean.Proofs.decode_encode`. `encode_size_le_max` is
+  axiom-free over the standard kernel axioms.
 
 - **Pluggable hash function.** Today it's SHA-256. Tomorrow it
   can be Poseidon2 — or whatever the Beam Chain redesign settles
@@ -147,13 +168,85 @@ ARCHITECTURE.md §8 carries the recipe for reintroducing any of
 these the day a fork adopts them — they slot back into `SSZType`
 as new constructors without disrupting the existing layers.
 
+### Proof coverage
+
+The three central theorems — `decode_encode` (roundtrip),
+`serialize_injective` (non-malleability), and
+`encode_size_le_max` (size bound) — are landed on the
+`SSZType.BasicSupported` cut (`Spec/BasicSupported.lean`).
+Per-constructor breakdown:
+
+| `SSZType` constructor | `decode_encode` | `serialize_injective` | `encode_size_le_max` | Notes |
+|---|:---:|:---:|:---:|---|
+| `.uintN 8` | ✅ | ✅ | ✅ | closes by `rfl` after one `unfold` |
+| `.uintN 16` | ✅ ¹ | ✅ ¹ | ✅ | `bv_decide` on the LE identity |
+| `.uintN 32` | ✅ ¹ | ✅ ¹ | ✅ | `bv_decide` |
+| `.uintN 64` | ✅ ¹ | ✅ ¹ | ✅ | `bv_decide` |
+| `.bool` | ✅ | ✅ | ✅ | exhaustive `cases` + `rfl` |
+| `.vector t n` | ✅ ² | ✅ ² | ✅ ² | needs `0 < n` + `BasicSupported t` + `t.isFixedSize = true` |
+| `.list t cap` | ✅ ³ | ✅ ³ | ✅ ³ | needs `BasicSupported t` + `t.isFixedSize = true` + `0 < t.fixedByteSize` |
+| `.bitvector n` | ❌ | ❌ | ❌ | bit-packing inverse (`packBitsLE` / `unpackBitsLEAux`) not yet shipped |
+| `.bitlist cap` | ❌ | ❌ | ❌ | needs bit-packing inverse + `msbPos` delimiter recovery |
+| `.container fs` | see below | see below | see below | — |
+
+¹ Adds one `_native.bv_decide.ax_*` axiom per arm (SAT certificate
+for the multi-byte LE identity). `decode_encode`'s and
+`serialize_injective`'s overall trust footprint is exactly these
+three axioms plus the standard kernel axioms (`propext`,
+`Classical.choice`, `Quot.sound`); `encode_size_le_max` adds
+none.
+² Recurses on the element type's `BasicSupported` witness via
+the mutual `decode_encode` ↔ `decode_encode_containerFixed_aux`
+block.
+³ Same recursion shape as `.vector`.
+
+`serialize_injective` is a direct corollary of `decode_encode`
+(via `Except.ok.inj` + `Prod.mk.inj`), so its coverage tracks
+`decode_encode` exactly.
+
+#### `.container fs` — per-field type
+
+A container `.container fs` is in `BasicSupported` exactly when
+every field type is itself `BasicSupported` *and* fixed-size.
+Allowed and excluded field types:
+
+| Field type | Allowed as a container field? | Why |
+|---|:---:|---|
+| `.uintN 8 / 16 / 32 / 64` | ✅ | basic + fixed |
+| `.bool` | ✅ | basic + fixed |
+| `.vector t' n` (with `n > 0`, fixed-size `t'`, `BasicSupported t'`) | ✅ | nested vector, `(.vector t' n).isFixedSize = t'.isFixedSize` |
+| `.container fs'` (with `BasicSupportedFieldsFixed fs'`) | ✅ | nested container, `(.container fs').isFixedSize = allFixedSize fs'` |
+| `.bitvector n` | ❌ | not in `BasicSupported` yet (would qualify once the bitvector arm lands — it *is* fixed-size) |
+| `.list t' cap` | ❌ | `(.list _ _).isFixedSize = false` — structurally excluded |
+| `.bitlist cap` | ❌ | `(.bitlist _).isFixedSize = false` — structurally excluded |
+
+For `.list` and `.bitlist` the exclusion is *structural*: they're
+variable-size by SSZ definition, so they cannot satisfy
+`BasicSupportedFieldsFixed`'s `t.isFixedSize = true` precondition.
+Mixed-field containers (containers with at least one variable-size
+field) are **outside `SSZType.Supported` entirely** — not just
+outside `BasicSupported`. The spec layer flags this as
+`TODO(stage-3-deferral)` in `Spec/Deserialize.lean`; closing it
+requires extending `Supported` with a `containerVar` constructor
+plus an offset-table-invariants proof.
+
+In one line: containers with fields drawn from `{uintN8, uintN16,
+uintN32, uintN64, bool, vectorFixed, containerFixed (recursively)}`
+are proved; containers with any `bitvector`, `list`, or `bitlist`
+field are not.
+
 ### Track in progress
 
 **Phase 5 formal-verification widening** — the three central
 theorems (roundtrip, non-malleability, size bound) are landed on
-the narrow `BasicSupported` cut; widening to a universal statement
-over `Supported` is the open work. The library itself is
-complete; this track only closes the proof obligation.
+the `BasicSupported` cut, which now covers `uintN 8 / 16 / 32 /
+64`, `bool`, fixed-size `vector` and `list`, and `container` over
+fixed-size fields (recursively). Widening to a universal statement
+over `SSZType.Supported` requires closing the remaining
+`bitvector` and `bitlist` arms (bit-packing inverse), plus
+extending `Supported` itself to admit mixed-field containers
+(spec-layer follow-up). The library itself is complete; this
+track only closes the proof obligation.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the staged roadmap and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design

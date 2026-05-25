@@ -36,12 +36,23 @@ are then thin wrappers; `SSZ.roundtrip` lifts the spec-side
 
 ## Why `SSZ.roundtrip` is gated by `BasicSupported r.shape`
 
-The library's `decode_encode` proof currently covers only the
-narrow `BasicSupported` subset (`.bool` and
-`.container [.bool, .bool]`). The user-surface corollary inherits
-that gate: a user type whose shape sits inside `BasicSupported`
-enjoys verified roundtrip; a user type whose shape is outside
-`BasicSupported` enjoys total `serialize` / `deserialize` (the
+The library's `decode_encode` proof currently covers the
+`BasicSupported` subset:
+
+* `.uintN 8 / 16 / 32 / 64`, `.bool` — basic primitives.
+* `.vector t n` / `.list t cap` / `.container fs` — general
+  composites over fixed-size element / field types
+  (`BasicSupported t` with `t.isFixedSize = true`).
+* `.container [.bool, .bool]` — concrete two-`Bool` container,
+  retained as a `def`-level alias of `containerFixed (.cons .bool
+  rfl (.cons .bool rfl .nil))` for backward-compat with the
+  hand-written `Pair` example.
+
+The user-surface corollary inherits that gate: a user type whose
+shape sits inside `BasicSupported` enjoys verified roundtrip; a
+user type whose shape is outside `BasicSupported` (currently
+`.bitvector` and `.bitlist` — both pending the bit-packing
+inverse proof) enjoys total `serialize` / `deserialize` (the
 spec functions are total) but no verified roundtrip yet. Wider
 proof coverage is planned future work; until it lands the gate is
 honest about scope and grows automatically as the proof set

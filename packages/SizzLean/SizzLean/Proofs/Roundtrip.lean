@@ -1,128 +1,153 @@
 import SizzLean.Spec.Supported
 import SizzLean.Spec.BasicSupported
 import SizzLean.Proofs.SimpAttrs
+import SizzLean.Proofs.SerializeSize
+import SizzLean.Proofs.UInt
+import SizzLean.Proofs.Bool
+import SizzLean.Proofs.VectorFixed
+import SizzLean.Proofs.ListFixed
+import SizzLean.Proofs.ContainerFixed
+import SizzLean.Proofs.FixedElems
 
 /-!
-# `SizzLean.Proofs.Roundtrip` — `decode_encode` over `BasicSupported`
+# `SizzLean.Proofs.Roundtrip` — `decode_encode` dispatch over `BasicSupported`
 
-The `decode_encode` theorem gated on `BasicSupported` (in
-`Spec/BasicSupported.lean`), which currently covers `.bool` and
-the concrete `.container [.bool, .bool]` shape. The
-universally-quantified form `∀ s, Supported s → …` is the
-planned generalisation.
+This file is the *dispatcher* for the central `decode_encode`
+theorem. Per-arm proofs live in sibling modules:
 
-The `.container [.bool, .bool]` arm exists so the `Pair
-{a b : Bool}` example structures (hand-written and
-`deriving`-generated) close via `SSZ.roundtrip` end-to-end rather
-than via `native_decide` — keeping the verified path lit at the
-user surface and treating native evaluation as a
-conformance-suite tool only (per ARCHITECTURE.md §4's tactic
-vocabulary).
+| Arm | File |
+|---|---|
+| `.uintN 8/16/32/64` | `Proofs/UInt.lean` |
+| `.bool` | `Proofs/Bool.lean` |
+| `.vectorFixed t n` | `Proofs/VectorFixed.lean` |
+| `.listFixed t cap` | `Proofs/ListFixed.lean` |
 
-The proof closes by exhaustive case analysis on the 4 inhabitants
-of `Bool × Bool × PUnit`: the kernel can fully evaluate each
-closed `serialize` / `deserialize` term, so `rfl` discharges each
-branch after a single `unfold` of the mutual block's top-level
-dispatch.
+## The mutual `decode_encode` / `decode_encode_containerFixed_aux`
 
-## Why concrete instead of universally-quantified
+For composite arms (`vectorFixed`, `listFixed`), `decode_encode`
+hands the per-arm helper a closure
+`fun y => decode_encode h_t y` — Lean's structural-recursion
+checker accepts this because the closure body's argument `h_t`
+is bound to the case-split's sub-witness (a strict subterm of
+`h_sup`).
 
-The general `containerFixed : SupportedFieldsFixed fs → …` form
-requires mutual induction across `BasicSupported` / a companion
-`BasicSupportedFieldsFixed` predicate, with size-decomposition and
-`ByteArray.extract`/`append` rewriting — several hundred lines of
-proof in full. The concrete approach keeps this file at ~80 lines
-while letting the universally-quantified version supersede the
-constructor cleanly when the proof set widens.
+For the `containerFixed` arm, the helper would need
+`∀ t ∈ fs, decode_encode_t` — but a closure abstracting `t`
+loses the connection to `fs`, and the checker can't verify
+well-foundedness. The fix is a **mutual block** with a partner
+function `decode_encode_containerFixed_aux` that recurses on
+`h_fs : BasicSupportedFieldsFixed` structurally and dispatches
+to `decode_encode` per-cons-head — Lean sees both descents as
+strict-subterm descents within the mutual inductive pair
+`(BasicSupported, BasicSupportedFieldsFixed)`.
+
+`Proofs/ContainerFixed.lean` still ships the substantive
+helpers (`deserializeFixedFields_append_shift`,
+`allFixedSize_of_BasicSupportedFieldsFixed`,
+`fixedByteSizeFields_le_maxByteLengthFields`) and the top-level
+wrapper `decode_encode_containerFixed` (which unfolds the
+encoder's `(fix ++ .empty)` shape into `fix`). This file's mutual
+block holds only the field-walker `decode_encode_containerFixed_aux`.
 -/
 
 set_option autoImplicit false
--- See `Spec/Deserialize.lean` and `Spec/HashTreeRoot.lean`: each
--- `unfold` of the mutual block in a proof requires the same
--- elaboration budget as defining the block itself.
-set_option maxHeartbeats 10000000
+set_option maxHeartbeats 400000000
 
 namespace SizzLean.Proofs
 
 open SizzLean.Spec
 
-/-! ### Per-shape roundtrip lemmas
+mutual
 
-One lemma per constructor of `BasicSupported`. Each is closed by
-`cases` on the concrete `s.interp` value (`Bool` for `.bool`,
-`Bool × Bool × PUnit` for `.container [.bool, .bool]`), followed by
-`unfold` of the mutual block and `rfl` for kernel reduction. -/
-
-/-- Roundtrip for `.bool`.
-
-Two ground cases (`true`, `false`); each reduces to `.ok (·, 1)` by
-unfolding the dispatch and letting the kernel evaluate the LE-byte
-write and read. -/
-theorem decode_encode_bool : ∀ (x : Bool),
-    SSZType.deserialize .bool (SSZType.serialize .bool x) =
-      .ok (x, (SSZType.serialize .bool x).size) := by
-  intro x
-  cases x <;> (unfold SSZType.deserialize SSZType.serialize; rfl)
-
-/-- Roundtrip for `.container [.bool, .bool]`.
-
-The interpretation `interpFields [.bool, .bool] = Bool × (Bool × PUnit)`
-has 4 inhabitants (`PUnit` has a single value); destructure with
-`obtain` then `cases` each `Bool`. Each closed case reduces by
-`unfold` + `rfl`: the encoder writes two consecutive 1-byte payloads
-(no offset table because both fields are fixed-size), and the decoder
-reads them back via `deserializeFixedFields` which steps through one
-byte at a time. -/
-theorem decode_encode_container_bool_bool :
-    ∀ (vs : SSZType.interpFields [.bool, .bool]),
-      SSZType.deserialize (.container [.bool, .bool])
-          (SSZType.serialize (.container [.bool, .bool]) vs) =
-        .ok (vs, (SSZType.serialize (.container [.bool, .bool]) vs).size) := by
-  intro vs
-  -- `vs : Bool × Bool × PUnit` by `interp` reduction at `.container [.bool, .bool]`.
-  obtain ⟨a, b, u⟩ := vs
-  -- `u : PUnit` has a single value; eliminate it.
-  cases u
-  -- 4 closed ground cases. The kernel doesn't auto-reduce mutual
-  -- block definitions, so we explicitly `simp` the spec-side mutual
-  -- members via the `ssz_simp` set (Proofs/SimpAttrs.lean tags them);
-  -- the closed-form evaluation lands at `Except.ok ...` on both
-  -- sides and `rfl` closes.
-  cases a <;> cases b <;>
-    (simp [SSZType.deserialize, SSZType.serialize,
-           SSZType.deserializeFixedFields, SSZType.serializeFieldsAux,
-           SSZType.fixedByteSize, SSZType.fixedSectionSizeFields,
-           SSZType.fixedSectionSize,
-           SSZType.allFixedSize, SSZType.isFixedSize];
-     rfl)
-
-/-! ### Dispatch theorem
-
-Roundtrip for any `BasicSupported` shape. With two constructors in
-scope, the dispatch is two delegations — each new shape added to
-`BasicSupported` extends this `cases` with one more arm. -/
-
-/-- Roundtrip over `BasicSupported`. Covers `.bool` and the
-`Pair`-shaped container; parameterised over the predicate so that
-extending coverage means extending the predicate (no signature
-change at the call site). -/
+/-- Roundtrip over `BasicSupported`. Dispatches to per-arm
+proofs; composite arms call into the mutual partner
+`decode_encode_containerFixed_aux` for field-list induction. -/
 theorem decode_encode : ∀ {s : SSZType}, SSZType.BasicSupported s →
     ∀ (x : s.interp),
       SSZType.deserialize s (SSZType.serialize s x) =
-        .ok (x, (SSZType.serialize s x).size) := by
-  intro s h_sup x
-  cases h_sup with
-  | bool =>
-      -- `x : (.bool).interp` is definitionally `Bool`. The annotated
-      -- `let` forces the kernel to perform that reduction so the call
-      -- to `decode_encode_bool` typechecks against the explicit `Bool`
-      -- argument.
-      let b' : Bool := x
-      exact decode_encode_bool b'
-  | containerBoolBool =>
-      -- Same idiom: coerce through `let` so `decode_encode_container_bool_bool`'s
-      -- explicit `interpFields [.bool, .bool]` argument typechecks.
-      let vs : SSZType.interpFields [.bool, .bool] := x
-      exact decode_encode_container_bool_bool vs
+        .ok (x, (SSZType.serialize s x).size)
+  | _, .uintN8, x => decode_encode_uintN8 x
+  | _, .uintN16, x => decode_encode_uintN16 x
+  | _, .uintN32, x => decode_encode_uintN32 x
+  | _, .uintN64, x => decode_encode_uintN64 x
+  | _, .bool, b => decode_encode_bool b
+  | _, .vectorFixed (t := t) (n := n) h_pos h_t h_t_fixed, v =>
+      decode_encode_vectorFixed t n h_pos h_t h_t_fixed
+        (fun y => decode_encode h_t y) v
+  | _, .listFixed (t := t) (cap := cap) h_t h_t_fixed h_sz_pos, xs =>
+      decode_encode_listFixed t cap h_t h_t_fixed h_sz_pos
+        (fun y => decode_encode h_t y) xs
+  | _, .containerFixed (fs := fs) h_fs, vs => by
+      -- Reduce the encoder's `(fix, var)` shape to just `fix` (var = .empty for
+      -- all-fixed fields), then dispatch into the mutual aux for field-list induction.
+      have h_var_empty := (size_serializeFieldsAux_fix h_fs vs
+                            (SSZType.fixedSectionSizeFields fs)).2
+      have h_fix_size := (size_serializeFieldsAux_fix h_fs vs
+                            (SSZType.fixedSectionSizeFields fs)).1
+      have h_all_fixed := allFixedSize_of_BasicSupportedFieldsFixed h_fs
+      have h_serialize_size :
+          (SSZType.serialize (.container fs) vs).size =
+            SSZType.fixedByteSizeFields fs := by
+        unfold SSZType.serialize
+        simp [h_var_empty, h_fix_size]
+      rw [h_serialize_size]
+      unfold SSZType.serialize
+      simp only [h_var_empty, ByteArray.append_empty]
+      unfold SSZType.deserialize
+      simp only [h_all_fixed, if_true]
+      exact decode_encode_containerFixed_aux h_fs vs _
+
+/-- Field-walker companion: induct on `h_fs` and dispatch
+per-cons-head to `decode_encode`. -/
+theorem decode_encode_containerFixed_aux : ∀ {fs : List SSZType}
+    (h_fs : SSZType.BasicSupportedFieldsFixed fs)
+    (vs : SSZType.interpFields fs) (varOff : Nat),
+    SSZType.deserializeFixedFields fs
+        (SSZType.serializeFieldsAux fs vs varOff).1 0 =
+      .ok (vs, SSZType.fixedByteSizeFields fs)
+  | _, .nil, vs, _ => by
+      unfold SSZType.serializeFieldsAux SSZType.deserializeFixedFields
+        SSZType.fixedByteSizeFields
+      rcases vs with ⟨⟩
+      simp
+  | _, .cons (t := t) (ts := ts) h_t h_t_fixed h_ts, vs, varOff => by
+      have h_head_size :
+          (SSZType.serialize t vs.1).size = t.fixedByteSize :=
+        size_serialize_eq_fixedByteSize h_t h_t_fixed vs.1
+      have h_head_de := decode_encode h_t vs.1
+      have h_enc :
+          (SSZType.serializeFieldsAux (t :: ts) vs varOff).1 =
+            SSZType.serialize t vs.1 ++
+              (SSZType.serializeFieldsAux ts vs.2 varOff).1 := by
+        show (SSZType.serializeFieldsAux (t :: ts) vs varOff).1 = _
+        simp only [SSZType.serializeFieldsAux, h_t_fixed, if_true]
+      rw [h_enc]
+      unfold SSZType.deserializeFixedFields
+      have h_head_chunk :
+          (SSZType.serialize t vs.1 ++
+            (SSZType.serializeFieldsAux ts vs.2 varOff).1).extract 0
+            (0 + t.fixedByteSize) = SSZType.serialize t vs.1 := by
+        rw [Nat.zero_add,
+            show t.fixedByteSize = (SSZType.serialize t vs.1).size from h_head_size.symm]
+        exact ByteArray.extract_append_eq_left rfl
+      simp only [h_head_chunk, h_head_de, h_head_size, ne_eq,
+                 not_true_eq_false, ite_false]
+      have h_shift :
+          SSZType.deserializeFixedFields ts
+              (SSZType.serialize t vs.1 ++
+                (SSZType.serializeFieldsAux ts vs.2 varOff).1)
+              (0 + t.fixedByteSize) =
+            SSZType.deserializeFixedFields ts
+              (SSZType.serializeFieldsAux ts vs.2 varOff).1 0 := by
+        have h_eq : 0 + t.fixedByteSize = (SSZType.serialize t vs.1).size + 0 := by
+          rw [h_head_size, Nat.add_zero, Nat.zero_add]
+        rw [h_eq, deserializeFixedFields_append_shift]
+      rw [h_shift, decode_encode_containerFixed_aux h_ts vs.2 varOff]
+      show Except.ok ((vs.1, vs.2), t.fixedByteSize + SSZType.fixedByteSizeFields ts) =
+           Except.ok (vs, SSZType.fixedByteSizeFields (t :: ts))
+      rw [Prod.eta]
+      rfl
+
+end
 
 end SizzLean.Proofs

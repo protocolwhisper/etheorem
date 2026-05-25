@@ -154,10 +154,17 @@ def SSZType.fixedSectionSizeFields : List SSZType → Nat
   | []      => 0
   | t :: ts => t.fixedSectionSize + SSZType.fixedSectionSizeFields ts
 
-/-! ### Little-endian primitive encoders -/
+/-! ### Little-endian primitive encoders
+
+These are package-internal helpers — the user-facing API is
+`SSZType.serialize` — but exposed as plain `def` (not `private`) so the
+Layer 2 proofs in `Proofs/Roundtrip.lean` can `unfold` / `simp` them
+through their public name when discharging the `.uintN N` arms of
+`decode_encode`. `unfold` can see through `private`, but `simp` cannot
+without a public name. -/
 
 /-- `UInt32` → 4 little-endian bytes. -/
-private def uint32LE (x : UInt32) : ByteArray :=
+def uint32LE (x : UInt32) : ByteArray :=
   ByteArray.empty
     |>.push x.toUInt8
     |>.push (x >>> 8).toUInt8
@@ -165,13 +172,13 @@ private def uint32LE (x : UInt32) : ByteArray :=
     |>.push (x >>> 24).toUInt8
 
 /-- `UInt16` → 2 little-endian bytes. -/
-private def uint16LE (x : UInt16) : ByteArray :=
+def uint16LE (x : UInt16) : ByteArray :=
   ByteArray.empty
     |>.push x.toUInt8
     |>.push (x >>> 8).toUInt8
 
 /-- `UInt64` → 8 little-endian bytes. -/
-private def uint64LE (x : UInt64) : ByteArray :=
+def uint64LE (x : UInt64) : ByteArray :=
   ByteArray.empty
     |>.push x.toUInt8
     |>.push (x >>> 8).toUInt8
@@ -200,8 +207,10 @@ the input goes to bit 0 (the LSB) of byte 0; bit 8 goes to bit 0 of
 byte 1; etc. -/
 
 /-- Pack 0–8 bits into a single byte LSB-first. Excess bits beyond
-position 7 are dropped; callers chunk to length ≤ 8. -/
-private def bitsToByte : List Bool → Nat → UInt8 → UInt8
+position 7 are dropped; callers chunk to length ≤ 8. Public so the
+Layer 2 bit-packing inverse proof in `Proofs/BitPack.lean` can
+reach it. -/
+def bitsToByte : List Bool → Nat → UInt8 → UInt8
   | [],            _, acc => acc
   | true  :: rest, k, acc => bitsToByte rest (k+1) (acc ||| ((1 : UInt8) <<< Nat.toUInt8 k))
   | false :: rest, k, acc => bitsToByte rest (k+1) acc
@@ -211,7 +220,7 @@ emitted in order: byte 0 carries bits 0..7, byte 1 carries bits 8..15,
 and so on. The pattern peels off 8 bits per recursive step (so
 recursion is structurally decreasing), with a tail clause for any
 final 1..7-bit fragment. -/
-private def packBitsLE : List Bool → ByteArray
+def packBitsLE : List Bool → ByteArray
   | [] => .empty
   | b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: b7 :: rest =>
       let byte := bitsToByte [b0, b1, b2, b3, b4, b5, b6, b7] 0 0
@@ -220,12 +229,12 @@ private def packBitsLE : List Bool → ByteArray
       ByteArray.empty.push (bitsToByte bs 0 0)
 
 /-- `BitVec n` → packed bytes (LSB-first, no delimiter). -/
-private def bitvecToBytes (n : Nat) (bv : BitVec n) : ByteArray :=
+def bitvecToBytes (n : Nat) (bv : BitVec n) : ByteArray :=
   packBitsLE ((List.range n).map (fun i => bv.getLsbD i))
 
 /-- `Bitlist` → packed bytes plus the trailing-`1` delimiter bit. An
 empty input produces a single `0x01` byte. -/
-private def bitlistToBytes (bs : Array Bool) : ByteArray :=
+def bitlistToBytes (bs : Array Bool) : ByteArray :=
   packBitsLE (bs.toList ++ [true])
 
 /-! ### The serializer

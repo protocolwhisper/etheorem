@@ -22,12 +22,19 @@ user-facing surface.
 
 `SSZ.roundtrip` is gated by `SSZType.BasicSupported r.shape`
 (`Repr/Class.lean`), and `BasicSupported` currently covers
-`.bool` and `.container [.bool, .bool]` (see
+the four native-width integers (`.uintN 8` / `16` / `32` / `64`),
+`.bool`, and `.container [.bool, .bool]` (see
 `Spec/BasicSupported.lean`). The smallest non-trivial user
-structure that lives in `BasicSupported` is therefore a
-two-`Bool` container — exactly the `Pair` defined below. Larger
-structures and structures with non-`Bool` fields ride on the
-general `containerFixed` widening planned for `BasicSupported`.
+structure that lives in `BasicSupported` is a two-`Bool`
+container — exactly the `Pair` defined below.
+
+The integer examples after the `Pair` block exercise the four
+`uintN` arms shipped in Stage 18: thin wrappers around
+`UInt8` / `UInt16` / `UInt32` / `UInt64`, each closing
+`SSZ.roundtrip` via the corresponding `BasicSupported`
+constructor. Larger structures and structures with non-`Bool`
+fields ride on the general `containerFixed` widening planned
+for `BasicSupported`.
 -/
 
 set_option autoImplicit false
@@ -61,11 +68,12 @@ instance instSSZReprPair : SSZRepr Pair where
   from_to  := fun ⟨_, _, u⟩ => by cases u; rfl
 
 /-- Acceptance check: roundtrip closes via `SSZ.roundtrip`, which
-dispatches on `Spec.SSZType.BasicSupported.containerBoolBool`.
-The Lean typechecker rejects this `example` if either the iso
-laws fail or the shape sits outside `BasicSupported`. -/
+dispatches on the general `containerFixed` arm with the explicit
+field-list witness `cons .bool rfl (cons .bool rfl nil)`. The
+Lean typechecker rejects this `example` if either the iso laws
+fail or the shape sits outside `BasicSupported`. -/
 example (p : Pair) : SSZ.deserialize (SSZ.serialize p) = .ok p :=
-  SSZ.roundtrip .containerBoolBool p
+  SSZ.roundtrip (.containerFixed (.cons .bool rfl (.cons .bool rfl .nil))) p
 
 /-! ### `deriving SSZRepr` example
 
@@ -83,10 +91,80 @@ structure DPair where
   deriving SSZRepr
 
 /-- Acceptance check: roundtrip on the `deriving`-generated
-instance. Closes through the same `containerBoolBool` predicate
-arm as the hand-written `Pair` example — the synthesised `shape`
-must definitionally equal `.container [.bool, .bool]`. -/
+instance. Closes through the same `containerFixed` arm as the
+hand-written `Pair` example — the synthesised `shape` must
+definitionally equal `.container [.bool, .bool]`. -/
 example (p : DPair) : SSZ.deserialize (SSZ.serialize p) = .ok p :=
-  SSZ.roundtrip .containerBoolBool p
+  SSZ.roundtrip (.containerFixed (.cons .bool rfl (.cons .bool rfl .nil))) p
+
+/-! ### Integer arm examples — Stage 18 `uintN` widening
+
+Each `example` exercises one of the four `uintN` constructors of
+`BasicSupported`. The library-provided `SSZRepr` instances for
+`UInt{8,16,32,64}` (in `Repr/Instances.lean`) all use the identity
+iso, so the user-surface `SSZ.serialize` / `SSZ.deserialize` just
+delegate to the spec functions and `SSZ.roundtrip` closes by
+direct application of the matching predicate constructor.
+
+These compile only if `decode_encode` discharges the integer arms;
+they are the typechecker-honest gate that the Stage 18 widening
+holds end-to-end through the user surface. -/
+
+example (x : UInt8) : SSZ.deserialize (SSZ.serialize x) = .ok x :=
+  SSZ.roundtrip .uintN8 x
+
+example (x : UInt16) : SSZ.deserialize (SSZ.serialize x) = .ok x :=
+  SSZ.roundtrip .uintN16 x
+
+example (x : UInt32) : SSZ.deserialize (SSZ.serialize x) = .ok x :=
+  SSZ.roundtrip .uintN32 x
+
+example (x : UInt64) : SSZ.deserialize (SSZ.serialize x) = .ok x :=
+  SSZ.roundtrip .uintN64 x
+
+/-! ### Composite arm examples
+
+Stage 18 also widens `BasicSupported` to general `vectorFixed`,
+`listFixed`, and `containerFixed`. Each arm carries small
+side-conditions (`0 < n` for vectors, `0 < t.fixedByteSize` for
+lists, an `allFixedSize` field list for containers); the witnesses
+are constructed inline below.
+
+These examples exercise the *spec-level* `decode_encode` rather
+than the user-surface `SSZ.roundtrip`. The user-surface path
+would require `SSZRepr` instances on the composite types
+(`Vector UInt64 4` etc.) plus matching the synthesised `shape`
+to the predicate witness — straightforward but mechanical.
+-/
+
+open SizzLean.Proofs SizzLean.Spec
+
+/-- Roundtrip for a 4-element `Vector UInt64`. The witness:
+`vectorFixed (h_pos := …) (h_t := .uintN64) (h_t_fixed := rfl)`. -/
+example (v : Vector UInt64 4) :
+    SSZType.deserialize (.vector (.uintN 64) 4)
+        (SSZType.serialize (.vector (.uintN 64) 4) v) =
+      Except.ok (v, (SSZType.serialize (.vector (.uintN 64) 4) v).size) :=
+  decode_encode (.vectorFixed (by decide) .uintN64 rfl) v
+
+/-- Roundtrip for a `SSZ.List UInt32 cap`. The witness:
+`listFixed (h_t := .uintN32) (h_t_fixed := rfl) (h_sz_pos := …)`. -/
+example (xs : { ys : Array UInt32 // ys.size ≤ 100 }) :
+    SSZType.deserialize (.list (.uintN 32) 100)
+        (SSZType.serialize (.list (.uintN 32) 100) xs) =
+      Except.ok (xs, (SSZType.serialize (.list (.uintN 32) 100) xs).size) :=
+  decode_encode (.listFixed .uintN32 rfl (by decide)) xs
+
+/-- Roundtrip for a general fixed-field container — three uintN
+fields. The `BasicSupportedFieldsFixed` witness is a triple-nested
+`.cons`. -/
+example (vs : SSZType.interpFields [.uintN 8, .uintN 16, .uintN 32]) :
+    SSZType.deserialize (.container [.uintN 8, .uintN 16, .uintN 32])
+        (SSZType.serialize (.container [.uintN 8, .uintN 16, .uintN 32]) vs) =
+      Except.ok (vs, (SSZType.serialize (.container [.uintN 8, .uintN 16, .uintN 32]) vs).size) :=
+  decode_encode (.containerFixed
+                  (.cons .uintN8 rfl
+                    (.cons .uintN16 rfl
+                      (.cons .uintN32 rfl .nil)))) vs
 
 end SizzLeanTests.ReprExamples

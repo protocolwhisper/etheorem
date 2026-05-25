@@ -9,12 +9,13 @@ typically wrap.
 
 ## Coverage
 
-* `SSZRepr Bool` — shape `.bool`, identity iso. The only currently-
-  `BasicSupported`-compatible instance.
+* `SSZRepr Bool` — shape `.bool`, identity iso. `BasicSupported`-
+  compatible; verified `SSZ.roundtrip` available.
 * `SSZRepr UInt8` / `UInt16` / `UInt32` / `UInt64` — shapes
-  `.uintN 8` / `16` / `32` / `64`, identity iso. Total
-  `serialize` / `deserialize` available; verified roundtrip via
-  `SSZ.roundtrip` requires the wider `decode_encode` proof.
+  `.uintN 8` / `16` / `32` / `64`, identity iso. All four are
+  `BasicSupported`-compatible (Stage 18 widening); verified
+  `SSZ.roundtrip` is available via the matching constructors
+  (`.uintN8` / `.uintN16` / `.uintN32` / `.uintN64`).
 * `SSZRepr (BitVec 128)` / `(BitVec 256)` — same shape, identity
   iso. Used for the 128/256-bit fields in consensus containers.
 * Composites — `Vector α n`, `SSZ.List α n` (= `SSZList`),

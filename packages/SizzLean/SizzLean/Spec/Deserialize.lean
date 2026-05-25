@@ -53,15 +53,19 @@ from core. The bracket-prime form `b[i]'h` supplies the bound proof
 on each access. The proofs here are discharged by `omega` from the outer
 `if h : off + k ≤ b.size` guard. -/
 
-/-- Read a single byte, `none` if out of bounds. -/
-private def readUInt8At (b : ByteArray) (off : Nat) : Option UInt8 :=
+/-- Read a single byte, `none` if out of bounds.
+
+Package-internal but plain `def` (not `private`) so the Layer 2 proofs
+in `Proofs/Roundtrip.lean` can `simp` it through its public name when
+discharging the `.uintN N` arms of `decode_encode`. -/
+def readUInt8At (b : ByteArray) (off : Nat) : Option UInt8 :=
   -- `dite` (`if h :`) splits on `Decidable (off < b.size)` and binds the
   -- proof `h` in the true branch; `b[off]` then synthesises the bound
   -- proof from `h` via the elaborator's local-context search.
   if h : off < b.size then .some b[off] else .none
 
 /-- Read a little-endian `UInt16`. -/
-private def readUInt16LE (b : ByteArray) (off : Nat) : Option UInt16 :=
+def readUInt16LE (b : ByteArray) (off : Nat) : Option UInt16 :=
   if h : off + 2 ≤ b.size then
     -- `.toUInt16` is dot notation on `UInt8`; Lean resolves
     -- `UInt8.toUInt16 : UInt8 → UInt16`. The widening is zero-extending.
@@ -71,7 +75,7 @@ private def readUInt16LE (b : ByteArray) (off : Nat) : Option UInt16 :=
   else .none
 
 /-- Read a little-endian `UInt32`. -/
-private def readUInt32LE (b : ByteArray) (off : Nat) : Option UInt32 :=
+def readUInt32LE (b : ByteArray) (off : Nat) : Option UInt32 :=
   if h : off + 4 ≤ b.size then
     let b0 : UInt32 := (b[off]'(by omega)).toUInt32
     let b1 : UInt32 := (b[off + 1]'(by omega)).toUInt32
@@ -81,7 +85,7 @@ private def readUInt32LE (b : ByteArray) (off : Nat) : Option UInt32 :=
   else .none
 
 /-- Read a little-endian `UInt64`. -/
-private def readUInt64LE (b : ByteArray) (off : Nat) : Option UInt64 :=
+def readUInt64LE (b : ByteArray) (off : Nat) : Option UInt64 :=
   if h : off + 8 ≤ b.size then
     let g (i : Nat) (h' : off + i < b.size) : UInt64 := (b[off + i]'h').toUInt64
     .some (g 0 (by omega) |||
@@ -160,22 +164,25 @@ private def extractCollOffsets (b : ByteArray) :
           | .ok rest  => .ok (o.toNat :: rest)
           | .error e  => .error e
 
-/-! ### Bit unpacking (LSB-first inversion of `packBitsLE`) -/
+/-! ### Bit unpacking (LSB-first inversion of `packBitsLE`)
+
+Public defs (not `private`) so the Layer 2 bit-packing inverse
+proof in `Proofs/BitPack.lean` can reach them. -/
 
 /-- Read the LSB-first bits of one byte (positions 0..7). -/
-private def byteToBits (b : UInt8) : List Bool :=
+def byteToBits (b : UInt8) : List Bool :=
   (List.range 8).map fun i => ((b >>> Nat.toUInt8 i) &&& 1) = 1
 
 /-- Unpack a `ByteArray` to a `(8 × bytes.size)`-long `List Bool`,
 LSB-first within each byte. Recurses structurally on `count`. -/
-private def unpackBitsLEAux (b : ByteArray) : (count off : Nat) → List Bool
+def unpackBitsLEAux (b : ByteArray) : (count off : Nat) → List Bool
   | 0,     _   => []
   | k + 1, off => byteToBits (b.get! off) ++ unpackBitsLEAux b k (off + 1)
 
 /-- Convert a `List Bool` (LSB-first, treating `bs[0]` as bit 0) to
 the `Nat` it encodes. Used to feed `BitVec.ofNat` for the
 `bitvector` decode path. -/
-private def bitsToNat : List Bool → Nat
+def bitsToNat : List Bool → Nat
   | []        => 0
   | b :: rest => (if b then 1 else 0) + 2 * bitsToNat rest
 
@@ -183,13 +190,13 @@ private def bitsToNat : List Bool → Nat
 returning `none` if `byte = 0`. Used to recover the `bitlist` data
 length from its trailing-`1`-bit delimiter. Recurses structurally on
 the descending search index. -/
-private def msbPosAux (byte : UInt8) : Nat → Option Nat
+def msbPosAux (byte : UInt8) : Nat → Option Nat
   | 0     => if (byte &&& 1) = 1 then .some 0 else .none
   | k + 1 =>
       if ((byte >>> Nat.toUInt8 (k+1)) &&& 1) = 1 then .some (k+1)
       else msbPosAux byte k
 
-private def msbPos (byte : UInt8) : Option Nat := msbPosAux byte 7
+def msbPos (byte : UInt8) : Option Nat := msbPosAux byte 7
 
 /-- `bitvector n` decoder. -/
 private def deserializeBitvector (n : Nat) (b : ByteArray) :

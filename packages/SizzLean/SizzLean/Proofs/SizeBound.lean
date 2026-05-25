@@ -1,100 +1,94 @@
 import SizzLean.Spec.Supported
 import SizzLean.Spec.MaxByteLength
-import SizzLean.Proofs.Roundtrip  -- for SSZType.BasicSupported
+import SizzLean.Spec.BasicSupported
+import SizzLean.Proofs.SimpAttrs
+import SizzLean.Proofs.SerializeSize
+import SizzLean.Proofs.UInt
+import SizzLean.Proofs.Bool
+import SizzLean.Proofs.VectorFixed
+import SizzLean.Proofs.ListFixed
+import SizzLean.Proofs.ContainerFixed
 
 /-!
 # `SizzLean.Proofs.SizeBound` — encoded-size upper bound
 
-The third central theorem:
+The third central theorem; *dispatcher* for the per-arm bounds.
 
-```
-theorem encode_size_le_max :
-    ∀ (s : SSZType) (x : s.interp),
-      (serialize s x).size ≤ s.maxByteLength
-```
+## Mutual block
 
-The "static upper bound on serialized size" guarantee: every
-value encodes to at most `s.maxByteLength` bytes, where
-`maxByteLength` is purely schema-derived (no value input). Useful
-for pre-flight buffer sizing and Merkleization-tree depth bounds
-downstream.
-
-## Scope (mirrors `Proofs/Roundtrip.lean` / `Proofs/Injective.lean`)
-
-The theorem ships under a narrow predicate covering only the
-`.bool` constructor — the same narrow predicate
-`decode_encode` and `serialize_injective` live on.
-
-The predicate reused here is `SSZType.BasicSupported` (defined in
-`Spec/BasicSupported.lean`). Future work widens it constructor by
-constructor in lockstep with `decode_encode`'s coverage.
-
-## What's deferred
-
-Same list as Roundtrip — when each constructor's `decode_encode`
-arm closes, the corresponding `encode_size_le_max` arm follows
-mechanically because the latter is an *independent* induction (no
-cross-stage decode dependency); the gating constraint is the
-`ByteArray.size_push` / `size_append` / `size_empty` lemmas, plus
-the `(n + 7) / 8`-style ceiling-divison arithmetic `omega` solves.
-
-## Lean idioms used here
-
-* `cases b` on a `Bool` value — produces the two literal sub-goals
-  with no free variables, allowing kernel `rfl` / `decide` to close.
-* The `decide` tactic on `Nat`-shaped inequalities — `1 ≤ 1` (etc.)
-  is decidable via the `Decidable (a ≤ b)` instance on `Nat`.
+Same shape as `Proofs/Roundtrip.lean`: the `containerFixed` case
+needs per-field size bound `∀ t ∈ fs, …`, which would force the
+helper to take a closure abstracting `t`; the structural-recursion
+checker doesn't see through the closure. Fix: pair
+`encode_size_le_max` with `encode_size_le_max_containerFields_aux`
+in a mutual block.
 -/
 
 set_option autoImplicit false
-set_option maxHeartbeats 5000000
+set_option maxHeartbeats 10000000
 
 namespace SizzLean.Proofs
 
 open SizzLean.Spec
 
-/-- Per-bool case of the size bound. Both `true` and `false`
-serialize to a 1-byte `ByteArray`, and `maxByteLength .bool = 1`,
-so `1 ≤ 1` closes each case. -/
-theorem encode_size_le_max_bool : ∀ (x : Bool),
-    (SSZType.serialize .bool x).size ≤ SSZType.maxByteLength .bool := by
-  intro x
-  cases x <;> (unfold SSZType.serialize SSZType.maxByteLength; decide)
-
-/-- Per-`Pair`-container case of the size bound. Two consecutive
-`Bool` fields encode to exactly 2 bytes; `maxByteLength
-(.container [.bool, .bool]) = 2`, so the inequality is `2 ≤ 2`.
-
-Like `decode_encode_container_bool_bool`, the kernel reduces each
-of the 4 closed ground cases end-to-end via `simp` + `decide`. -/
-theorem encode_size_le_max_container_bool_bool :
-    ∀ (vs : SSZType.interpFields [.bool, .bool]),
-      (SSZType.serialize (.container [.bool, .bool]) vs).size ≤
-        SSZType.maxByteLength (.container [.bool, .bool]) := by
-  intro vs
-  obtain ⟨a, b, u⟩ := vs
-  cases u
-  cases a <;> cases b <;>
-    (simp [SSZType.serialize, SSZType.serializeFieldsAux,
-           SSZType.fixedByteSize, SSZType.fixedSectionSizeFields,
-           SSZType.fixedSectionSize, SSZType.isFixedSize,
-           SSZType.maxByteLength, SSZType.maxByteLengthFields])
+mutual
 
 /-- *Encoded-size upper bound* (ARCHITECTURE.md §4): every
 `BasicSupported`-shape value's serialized form fits within the
-schema-derived `maxByteLength` upper bound. Each new arm closes
-by reducing both sides to `Nat` constants and discharging via
-`decide` (or `omega` once arithmetic on `+ 7 / 8` enters). -/
-theorem encode_size_le_max : ∀ (s : SSZType), SSZType.BasicSupported s →
+schema-derived `maxByteLength` upper bound. Composite arms call
+the mutual partner `encode_size_le_max_containerFields_aux`. -/
+theorem encode_size_le_max : ∀ {s : SSZType}, SSZType.BasicSupported s →
     ∀ (x : s.interp),
-      (SSZType.serialize s x).size ≤ SSZType.maxByteLength s := by
-  intro s h_sup x
-  cases h_sup with
-  | bool =>
-      let b' : Bool := x
-      exact encode_size_le_max_bool b'
-  | containerBoolBool =>
-      let vs : SSZType.interpFields [.bool, .bool] := x
-      exact encode_size_le_max_container_bool_bool vs
+      (SSZType.serialize s x).size ≤ SSZType.maxByteLength s
+  | _, .uintN8, x => encode_size_le_max_uintN8 x
+  | _, .uintN16, x => encode_size_le_max_uintN16 x
+  | _, .uintN32, x => encode_size_le_max_uintN32 x
+  | _, .uintN64, x => encode_size_le_max_uintN64 x
+  | _, .bool, b => encode_size_le_max_bool b
+  | _, .vectorFixed (t := t) (n := n) h_pos h_t h_t_fixed, v =>
+      encode_size_le_max_vectorFixed t n h_pos h_t h_t_fixed
+        (fun y => encode_size_le_max h_t y) v
+  | _, .listFixed (t := t) (cap := cap) h_t h_t_fixed _h_sz_pos, xs =>
+      encode_size_le_max_listFixed t cap h_t h_t_fixed
+        (fun y => encode_size_le_max h_t y) xs
+  | _, .containerFixed (fs := fs) h_fs, vs => by
+      -- Same dispatch as `decode_encode`'s container arm — reduce the
+      -- encoder's `(fix ++ var)` shape to size = `fixedByteSizeFields fs`,
+      -- then bound via the field-walker.
+      have h_var_empty := (size_serializeFieldsAux_fix h_fs vs
+                            (SSZType.fixedSectionSizeFields fs)).2
+      have h_fix_size := (size_serializeFieldsAux_fix h_fs vs
+                            (SSZType.fixedSectionSizeFields fs)).1
+      have h_serialize_size :
+          (SSZType.serialize (.container fs) vs).size = SSZType.fixedByteSizeFields fs := by
+        unfold SSZType.serialize
+        simp [h_var_empty, h_fix_size]
+      rw [h_serialize_size]
+      show SSZType.fixedByteSizeFields fs ≤ SSZType.maxByteLength (.container fs)
+      show SSZType.fixedByteSizeFields fs ≤ SSZType.maxByteLengthFields fs
+      exact encode_size_le_max_containerFields_aux h_fs vs
+
+/-- Field-walker companion: descend `h_fs` structurally; at each
+cons head, call `encode_size_le_max` on the field's
+`BasicSupported` witness to derive `fixedByteSize t ≤
+maxByteLength t`. -/
+theorem encode_size_le_max_containerFields_aux : ∀ {fs : List SSZType}
+    (h_fs : SSZType.BasicSupportedFieldsFixed fs)
+    (vs : SSZType.interpFields fs),
+    SSZType.fixedByteSizeFields fs ≤ SSZType.maxByteLengthFields fs
+  | _, .nil, _ => by
+      unfold SSZType.fixedByteSizeFields SSZType.maxByteLengthFields
+      decide
+  | _, .cons (t := t) (ts := ts) h_t h_t_fixed h_ts, vs => by
+      have h_head_le_max : t.fixedByteSize ≤ SSZType.maxByteLength t := by
+        have h := encode_size_le_max h_t vs.1
+        have h_sz := size_serialize_eq_fixedByteSize h_t h_t_fixed vs.1
+        rw [h_sz] at h; exact h
+      have h_tail := encode_size_le_max_containerFields_aux h_ts vs.2
+      unfold SSZType.fixedByteSizeFields SSZType.maxByteLengthFields
+      simp only [h_t_fixed, if_true]
+      omega
+
+end
 
 end SizzLean.Proofs
