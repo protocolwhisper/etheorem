@@ -53,7 +53,7 @@ unsafe def runPkgConfig (args : Array String)
     match result with
     | .ok r =>
         if r.exitCode == 0 then
-          let out := r.stdout.trim
+          let out := r.stdout.trimAscii.toString
           if out.isEmpty then return fallback
           return (out.splitOn " ").toArray.filter (fun a => !a.isEmpty)
         else

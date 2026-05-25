@@ -19,10 +19,28 @@ Three cases:
 |---|-----------------------------------------|-------------------------------|
 | 1 | `xs[i] := v` then `xs := shorter`       | Parent supersedes via commit-time drop (`commitAndHash` `[]`-path wins) |
 | 2 | `xs := shorter` then `xs[i] := v` (`i` OOB in `shorter`) | View-side `set!` is OOB-no-op; parent still supersedes at commit |
-| 3 | `xs[i] := v` directly with `i` OOB      | View-side `set!` is no-op; closure projects `view.xs[i]! = default α`; tree commits `default α` at position `i`. For `ExRoot = Vector UInt8 32`, `default = Vector.replicate 32 0`, whose merkle root equals the zero leaf — matches the natural zero-padding at OOB positions. *Fragile* — only safe when `default α`'s tree equals zero-padding. |
+| 3 | `xs[i] := v` directly with `i` OOB      | `PendingWrite T = T → Option Node` returns `none` when the view-side `set!` was an OOB no-op, so nothing is committed at position `i` and the cached root matches `SSZ.hashTreeRoot view` regardless of `default α`. |
 
-After the `PendingWrite T = T → Node` change (Option C), all
-three should produce tree roots matching `SSZ.hashTreeRoot view`.
+All three (and the further OOB / mixed-clause cases below) produce
+tree roots matching `SSZ.hashTreeRoot view`.
+
+**Expected build output.** The OOB cases (4, 5, 7) exercise
+`SSZList.set!` on the view side past the current length.
+`Array.set!` prints `Error: index out of bounds` on the panic
+path before returning the array unchanged — so `lake build
+SizzLeanTests` surfaces a few
+
+```
+info: SizzLeanTests/PendingListShrink.lean:N:0: Error: index out of bounds
+```
+
+lines from native_decide evaluation. These are *expected*
+runtime output from the deliberately-OOB inputs, not failures:
+the `PendingWrite` closure detects the OOB via the bounds
+guard, returns `none`, and the example closes. The
+`Build completed successfully` status line is the authoritative
+signal. The `just test-ssz` recipe prints a one-paragraph
+heads-up before invoking the build.
 -/
 
 set_option autoImplicit false
@@ -118,18 +136,15 @@ example :
 `default NonZeroElem = { a := 1, b := 1 }`. The view-side `set! 6 v`
 is an OOB no-op so the view stays at length 3 with original values.
 
-**This test is deliberately written to FAIL with `native_decide`
-under the current closure-based pending design**: the closure
-for `vals[6]` projects `view.vals[6]! = default NonZeroElem =
-{ a := 1, b := 1 }`, builds `Node.ofShape` of that non-zero
-element, and writes it into the tree at position 6. The tree's
-root then reflects a length-3 list with non-zero garbage at
-position 6, while `SSZ.hashTreeRoot view` correctly pads
-position 6 with zero — so the two diverge.
-
-The fix is to make the closure return `Option Node`, with `none`
-signalling "the view-side set! was an OOB no-op; skip this
-pending entry". Once that lands, this case will pass. -/
+This case is the regression guard for the `PendingWrite T =
+T → Option Node` design: under the earlier `T → Node` shape, the
+closure for `vals[6]` projected `view.vals[6]! = default NonZeroElem
+= { a := 1, b := 1 }`, built `Node.ofShape` of that non-zero
+element, and wrote it into the tree at position 6 — diverging
+from `SSZ.hashTreeRoot view`, which correctly zero-pads. The
+current closure returns `none` when the view-side `set!` was an
+OOB no-op, so the pending entry is dropped and the cached root
+matches the spec root regardless of `default α`. -/
 private def nzInitial : SSZList NonZeroElem 8 :=
   ⟨#[{ a := 10, b := 20 },
      { a := 11, b := 21 },

@@ -159,6 +159,40 @@ See [`docs/PLAN.md`](docs/PLAN.md) for the staged roadmap and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design
 contract.
 
+## Prerequisites
+
+On a fresh machine you need four things before `lake build` will
+work. The Lean toolchain and `just` itself aren't installed by
+the project — they're external tools the recipes assume.
+
+1. **`elan`** (Lean toolchain manager — provides `lake` /
+   `lean`). The version in [`../../lean-toolchain`](../../lean-toolchain)
+   is installed on first use.
+
+   ```bash
+   curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
+   ```
+
+2. **`just`** (task runner — every workflow below is wrapped in
+   a `just` recipe; `just doctor` won't run until `just` itself
+   is installed). Install via your platform's package manager
+   (`brew install just`, `cargo install just`, distro package,
+   …) — see <https://just.systems>.
+
+3. **OpenSSL 3.x + `pkg-config`** (system-level build deps for
+   the SHA-256 FFI shim — see [Dependencies → System-level](#system-level-build-time-native-deps)
+   below for the per-platform one-liners).
+
+4. **`python3` + `uv`** (only for `just official-ssz-vector-tests*`).
+   Run `just setup-python` from the umbrella root once to create
+   `.venv/` and install the harness deps.
+
+From the umbrella root, verify everything in one shot:
+
+```bash
+just doctor          # checks elan/lake/lean + pkg-config/OpenSSL + python3/uv
+```
+
 ## Dependencies
 
 ### Lean-level

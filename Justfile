@@ -174,8 +174,19 @@ test: test-sha256 test-ssz test-eth
 test-sha256:
     lake build LeanSha256Tests
 
+# `SizzLeanTests.PendingListShrink` Cases 4/5/7 deliberately drive
+# OOB `SSZList.set!` writes — `Array.set!` prints a panic message
+# on stderr before returning the array unchanged, so `lake build`
+# surfaces a few `info: …Error: index out of bounds` lines from
+# native_decide evaluation. The banner below primes readers; the
+# file's module docstring has the full story.
 # In-Lean SSZ-library property tests (hasher equivalence, Merkle PRNG, cache machinery on example containers)
 test-ssz:
+    @echo "  note: PendingListShrink.lean Cases 4/5/7 deliberately exercise"
+    @echo "  out-of-bounds SSZList writes; a few \"Error: index out of bounds\""
+    @echo "  info: lines in the output below are expected and not failures."
+    @echo "  The final \"Build completed successfully\" line is authoritative."
+    @echo
     lake build SizzLeanTests
 
 # LeanEthCS validation — building the library *is* the test: every `deriving SSZRepr` is a compile-time gate. No in-Lean property tests of its own; upstream-vector conformance lives under `official-ssz-vector-tests*`.

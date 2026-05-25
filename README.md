@@ -93,6 +93,46 @@ Repo-wide docs at the root:
 - [`SECURITY.md`](SECURITY.md) — vulnerability-disclosure policy.
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — community guidelines.
 
+## Prerequisites
+
+On a fresh machine you need four things before `lake build` will
+work. The Lean toolchain and `just` itself aren't installed by
+the project — they're external tools the recipes assume.
+
+1. **`elan`** (the Lean toolchain manager — provides `lake` /
+   `lean`). The version in [`lean-toolchain`](lean-toolchain) is
+   installed on first use.
+
+   ```bash
+   curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
+   ```
+
+2. **`just`** (task runner — every workflow below is wrapped in
+   a `just` recipe; `just doctor` won't run until `just` itself
+   is installed). Install via your platform's package manager:
+   `brew install just` (macOS), `cargo install just` (anywhere
+   with Rust), or see <https://just.systems> for distro packages.
+
+3. **OpenSSL 3.x + `pkg-config`** (system-level build deps for
+   the SHA-256 FFI shim — see [Native dependencies](#native-dependencies)
+   below for the per-platform one-liners). The Justfile's
+   `doctor-native` recipe pinpoints what's missing.
+
+4. **`python3` + `uv`** (only for `official-ssz-vector-tests*`).
+   Run `just setup-python` once to create `.venv/` and install
+   the harness deps.
+
+Verify everything in one shot:
+
+```bash
+just doctor          # checks elan/lake/lean + pkg-config/OpenSSL + python3/uv
+```
+
+`just doctor` prints actionable platform-specific install hints
+if anything's missing. The CI runs the slimmer `just doctor-native`
+gate (build-time native deps only — the Lean toolchain is
+installed by `leanprover/lean-action` later in the workflow).
+
 ## Build
 
 Toolchain pinned in [`lean-toolchain`](lean-toolchain) (elan picks it up).
@@ -158,9 +198,9 @@ the **`ssz_generic`** suite (type-agnostic SSZ tests for `uints`,
 with a `--limit N` subset cap by default.
 
 ```bash
-# One-time: create a Python venv with the needed deps (cramjam + PyYAML)
-uv venv
-uv pip install -r scripts/requirements.txt
+# One-time: create `.venv/` with the harness deps (cramjam + PyYAML).
+# Wraps `uv venv` + `uv pip install -r scripts/requirements.txt`.
+just setup-python
 
 # Default: ssz_generic subset (5 cases per handler/suite)
 .venv/bin/python scripts/run_conformance.py
