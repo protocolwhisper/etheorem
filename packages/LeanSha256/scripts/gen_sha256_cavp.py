@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """Generate a Lean conformance file from NIST CAVP SHA-256 .rsp vectors.
 
-Reads `packages/LeanSha256/cavp/SHA256ShortMsg.rsp` + `packages/LeanSha256/cavp/SHA256LongMsg.rsp` (CAVS 11.0
-byte-oriented test files) and emits `packages/LeanSha256/LeanSha256Tests/Nist.lean` — one
-`native_decide` example per (Len, Msg, MD) triple, asserting
+Reads `cavp/SHA256ShortMsg.rsp` + `cavp/SHA256LongMsg.rsp` (CAVS 11.0
+byte-oriented test files, sibling-of-this-script under the
+`LeanSha256` package root) and emits `LeanSha256Tests/Nist.lean` —
+one `native_decide` example per (Len, Msg, MD) triple, asserting
 `LeanSha256.hash msg = md`. The file lives next to the spec it
 validates, in the `LeanSha256` library.
 
 FFI conformance to NIST is *not* tested here directly — it follows
 by transitivity from:
 * this file (spec ≡ NIST on 129 vectors);
-* `SizzLeanConformance/Sha256Equivalence.lean` (FFI ≡ spec on 185
-  random inputs + 5 NIST §B vectors).
+* `packages/SizzLean/SizzLeanTests/Sha256Equivalence.lean`
+  (FFI ≡ spec on 185 random inputs + 5 NIST §B vectors).
 
 Special case: when `Len = 0`, the `Msg = 00` placeholder is *not*
 hashed — the input is the empty `ByteArray`. NIST's file format
 always lists a Msg line for grammatical regularity; the Len field
 authoritatively determines the input.
 
-Run from the repo root:
+Paths resolve relative to this script's location inside the
+`LeanSha256` package, so it runs from anywhere:
 
-    python3 scripts/gen_sha256_cavp.py
+    python3 packages/LeanSha256/scripts/gen_sha256_cavp.py
 
-Regenerate after `lake build LeanSha256` to refresh the asserts;
-the file is otherwise stable and can be checked in.
+The umbrella `Justfile` wraps the invocation as `just gen-cavp`.
+Regenerate when NIST publishes a refreshed vector set; the output
+is otherwise stable and is checked in.
 """
 
 import sys
@@ -78,8 +81,9 @@ Auto-generated from `cavp/SHA256ShortMsg.rsp` +
 `cavp/SHA256LongMsg.rsp` (CAVS 11.0 byte-oriented test files
 distributed by NIST's Cryptographic Algorithm Validation Program).
 The shabytetestvectors archive lives on csrc.nist.gov; the .rsp
-files are committed to this repo under `cavp/` and regenerated via
-`scripts/gen_sha256_cavp.py`.
+files are committed to this package under `cavp/` and regenerated
+via the sibling `scripts/gen_sha256_cavp.py` (umbrella shortcut:
+`just gen-cavp`).
 
 This file lives in the `LeanSha256` library — it validates the
 SHA-256 *spec* directly against NIST's published vectors,
@@ -92,8 +96,8 @@ triple emits one `native_decide` example:
 FFI ≡ NIST follows by transitivity from:
 
 * this file (spec ≡ NIST on 129 vectors);
-* `SizzLeanConformance/Sha256Equivalence.lean` (FFI ≡ spec on
-  randomised inputs + the 5 NIST §B vectors via
+* `packages/SizzLean/SizzLeanTests/Sha256Equivalence.lean`
+  (FFI ≡ spec on randomised inputs + the 5 NIST §B vectors via
   `Sha256Vectors.lean`).
 
 The cross-implementation gate is empirical — a deliberate
@@ -147,10 +151,12 @@ def emit_examples(out_lines: list[str], path: Path, suite_name: str):
 
 
 def main():
-    repo = Path(__file__).resolve().parent.parent
-    short_path = repo / "packages" / "LeanSha256" / "cavp" / "SHA256ShortMsg.rsp"
-    long_path = repo / "packages" / "LeanSha256" / "cavp" / "SHA256LongMsg.rsp"
-    out_path = repo / "packages" / "LeanSha256" / "LeanSha256Tests" / "Nist.lean"
+    # `__file__` lives at `packages/LeanSha256/scripts/gen_sha256_cavp.py`,
+    # so `parent.parent` is the `LeanSha256` package root.
+    pkg = Path(__file__).resolve().parent.parent
+    short_path = pkg / "cavp" / "SHA256ShortMsg.rsp"
+    long_path = pkg / "cavp" / "SHA256LongMsg.rsp"
+    out_path = pkg / "LeanSha256Tests" / "Nist.lean"
 
     for p in (short_path, long_path):
         if not p.is_file():

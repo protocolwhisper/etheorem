@@ -284,7 +284,7 @@ official-ssz-vector-tests-all: official-ssz-vector-tests-generic-full official-s
 
 # Re-generate the NIST CAVP vector table from `packages/LeanSha256/cavp/*.rsp`
 gen-cavp:
-    .venv/bin/python scripts/gen_sha256_cavp.py
+    .venv/bin/python packages/LeanSha256/scripts/gen_sha256_cavp.py
 
 # Re-generate the CLI dispatch table (writes to LeanEthCS Cli/Main.lean)
 gen-cli-dispatch:
