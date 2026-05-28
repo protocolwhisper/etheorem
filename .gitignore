@@ -6,6 +6,14 @@ packages/*/.lake/
 # Lake when building from the umbrella; only the top-level
 # `lake-manifest.json` is checked in (per CLAUDE.md's dep policy).
 packages/*/lake-manifest.json
+# Exception: `LeanSha256` is mirror-published as a standalone Lake
+# package at `github.com/etheorem/LeanSha256` (subtree-split from this
+# monorepo). The downstream repo needs a `lake-manifest.json` at its
+# root for Reservoir inclusion + reproducible builds, so we ship the
+# subpackage's manifest with the source. LeanSha256 has zero
+# dependencies, so the manifest is effectively static — regenerate
+# with `cd packages/LeanSha256 && lake update` if that ever changes.
+!packages/LeanSha256/lake-manifest.json
 
 # Python virtual environment and bytecode caches
 /.venv

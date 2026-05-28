@@ -1,0 +1,101 @@
+# Mirror `packages/LeanSha256/` to `github.com/etheorem/LeanSha256`
+# as a standalone Lake package, preserving the per-file history of
+# that subtree. The downstream repo is a read-only artifact;
+# contributions land in this monorepo, the mirror is regenerated
+# automatically.
+#
+# How it works:
+#   1. `git subtree split --prefix=packages/LeanSha256 -b _split`
+#      rewrites the umbrella history so the synthetic `_split`
+#      branch contains only commits that touched files under
+#      `packages/LeanSha256/`, with paths re-rooted at the package
+#      directory. Authorship / dates / messages are preserved.
+#      The rewrite is deterministic: given the same umbrella
+#      history the same `_split` SHAs come out every run, so
+#      ordinary fast-forward pushes work across runs (we still use
+#      `--force-with-lease` defensively).
+#   2. The split tip is pushed to `etheorem/LeanSha256:main` over
+#      SSH using the deploy key in `secrets.LEANSHA256_DEPLOY_KEY`.
+#      The deploy key is configured on the downstream repo with
+#      write access; this workflow is the only thing that should
+#      hold it.
+#   3. When the trigger is a `leansha256-vX.Y.Z` tag on the
+#      umbrella, the workflow translates it to `vX.Y.Z` on the
+#      downstream and pushes the version tag. Reservoir surfaces
+#      `vX.Y.Z` tags as release versions on the package's index
+#      page.
+name: Mirror LeanSha256
+
+on:
+  push:
+    branches: [main]
+    tags: ['leansha256-v*']
+
+# Serialise mirror runs so two concurrent pushes don't race on the
+# downstream `main`. `cancel-in-progress: false` keeps every umbrella
+# push observable downstream — we'd rather queue than drop.
+concurrency:
+  group: mirror-leansha256
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout umbrella (full history)
+        uses: actions/checkout@v4
+        with:
+          # `git subtree split` walks the whole history; a shallow
+          # clone produces a truncated downstream history.
+          fetch-depth: 0
+          # We authenticate to the downstream via the deploy key
+          # injected by `webfactory/ssh-agent` below, not via the
+          # umbrella's GITHUB_TOKEN — the token cannot reach the
+          # downstream repo.
+          persist-credentials: false
+
+      - name: Load deploy key for etheorem/LeanSha256
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.LEANSHA256_DEPLOY_KEY }}
+
+      - name: Configure committer identity
+        # `git subtree split` sometimes needs to create a synthetic
+        # merge commit. Without a configured identity it fails with
+        # "Please tell me who you are". The bot identity matches
+        # the deploy-key holder; nothing else writes through here.
+        run: |
+          git config user.name "etheorem-bot"
+          git config user.email "etheorem-bot@users.noreply.github.com"
+
+      - name: Subtree-split LeanSha256 history
+        run: |
+          set -euo pipefail
+          git subtree split --prefix=packages/LeanSha256 -b _split
+          echo "Split tip: $(git rev-parse _split)"
+
+      - name: Add downstream remote
+        run: git remote add downstream git@github.com:etheorem/LeanSha256.git
+
+      - name: Push split to downstream main
+        if: github.ref == 'refs/heads/main'
+        # `--force-with-lease` is safe here: the downstream is a
+        # derived artifact, the only writer is this workflow, and
+        # the concurrency group above ensures no second run is mid-
+        # flight. The lease still catches the pathological case of
+        # someone manually pushing to the downstream between runs.
+        run: git push --force-with-lease downstream _split:main
+
+      - name: Translate `leansha256-v*` umbrella tag to `v*` downstream
+        if: startsWith(github.ref, 'refs/tags/leansha256-v')
+        run: |
+          set -euo pipefail
+          umbrella_tag="${GITHUB_REF#refs/tags/}"   # leansha256-vX.Y.Z
+          downstream_tag="${umbrella_tag#leansha256-}"  # vX.Y.Z
+          # The split tip corresponds to the commit the umbrella tag
+          # points at, because subtree split is a pure function of
+          # the input commit's tree of `packages/LeanSha256/` files.
+          git tag "$downstream_tag" _split
+          git push downstream "$downstream_tag"
