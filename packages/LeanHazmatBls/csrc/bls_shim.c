@@ -223,6 +223,60 @@ LEAN_EXPORT lean_obj_res lean_hazmat_bls_eth_aggregate_pubkeys(
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// g1_add : pk(48) → pk(48) → pk(48)
+//   @[extern "lean_hazmat_bls_g1_add"]
+// Raw G1 point addition of two compressed points (`bls.add` composed
+// with `bytes48_to_G1` / `G1_to_bytes48`). Empty ByteArray on a bad
+// length or encoding. No subgroup / identity rejection — this is a raw
+// point op, matching `Aggregate`'s "assumes valid inputs" convention;
+// callers establish validity via Verify. The sum may be the point at
+// infinity (compressed `0xc0‖0×47`), e.g. `g1_add(p, g1_neg(p))`.
+// ─────────────────────────────────────────────────────────────────────
+LEAN_EXPORT lean_obj_res lean_hazmat_bls_g1_add(
+    b_lean_obj_arg a_arr, b_lean_obj_arg b_arr)
+{
+    if (lean_sarray_size(a_arr) != PK_LEN) return mk_error();
+    if (lean_sarray_size(b_arr) != PK_LEN) return mk_error();
+
+    blst_p1_affine a_aff, b_aff;
+    if (blst_p1_uncompress(&a_aff, lean_sarray_cptr(a_arr)) != BLST_SUCCESS)
+        return mk_error();
+    if (blst_p1_uncompress(&b_aff, lean_sarray_cptr(b_arr)) != BLST_SUCCESS)
+        return mk_error();
+
+    blst_p1 a, sum;
+    blst_p1_from_affine(&a, &a_aff);
+    blst_p1_add_or_double_affine(&sum, &a, &b_aff);
+
+    byte out[PK_LEN];
+    blst_p1_compress(out, &sum);
+    return mk_bytearray(out, PK_LEN);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// g1_neg : pk(48) → pk(48)
+//   @[extern "lean_hazmat_bls_g1_neg"]
+// Negate a compressed G1 point (`G1_to_bytes48(neg(bytes48_to_G1(p)))`).
+// Empty ByteArray on a bad length or encoding.
+// ─────────────────────────────────────────────────────────────────────
+LEAN_EXPORT lean_obj_res lean_hazmat_bls_g1_neg(b_lean_obj_arg a_arr)
+{
+    if (lean_sarray_size(a_arr) != PK_LEN) return mk_error();
+
+    blst_p1_affine a_aff;
+    if (blst_p1_uncompress(&a_aff, lean_sarray_cptr(a_arr)) != BLST_SUCCESS)
+        return mk_error();
+
+    blst_p1 a;
+    blst_p1_from_affine(&a, &a_aff);
+    blst_p1_cneg(&a, /*cbit=*/true);
+
+    byte out[PK_LEN];
+    blst_p1_compress(out, &a);
+    return mk_bytearray(out, PK_LEN);
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // AggregateVerify : Array pk(48) → Array msg → sig(96) → Bool
 //   @[extern "lean_hazmat_bls_aggregate_verify"]
 // Distinct-message pairing check. `pks` and `msgs` must be the same

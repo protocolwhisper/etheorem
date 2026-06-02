@@ -178,4 +178,37 @@ example :
       (aggregate #[sign sk1 msgValid, sign sk2 msgValid]) = true := by
   native_decide
 
+/-! ### G1 point ops (`g1Add` / `g1Neg`)
+
+The pubkey-arithmetic primitives. Beyond basic algebra, these check the
+identity behind the sync-aggregate verification optimization:
+`aggregate(all) − aggregate(non_participants) = aggregate(participants)`. -/
+
+private def sk3 : ByteArray :=
+  hex "0000000000000000000000000000000000000000000000000000000000000005"
+private def pk3 : ByteArray := skToPk sk3
+
+/-- The G1 point at infinity, compressed: `0xc0` then 47 zero bytes. -/
+private def g1Infinity : ByteArray :=
+  ByteArray.mk (#[0xc0] ++ Array.replicate 47 0)
+
+/-- `p + (−p) = ∞`. -/
+example : g1Add pk1 (g1Neg pk1) = g1Infinity := by native_decide
+
+/-- Addition is commutative. -/
+example : g1Add pk1 pk2 = g1Add pk2 pk1 := by native_decide
+
+/-- `g1Add` matches `eth_aggregate_pubkeys` (incremental vs. batch sum). -/
+example : g1Add (ethAggregatePubkeys #[pk1, pk2]) pk3 = ethAggregatePubkeys #[pk1, pk2, pk3] := by
+  native_decide
+
+/-- The sync-aggregate optimization identity: subtracting the non-participants
+from the full aggregate equals aggregating the participants directly —
+`agg({p1,p2,p3}) + (−p3) = agg({p1,p2})`. -/
+example : g1Add (ethAggregatePubkeys #[pk1, pk2, pk3]) (g1Neg pk3) = ethAggregatePubkeys #[pk1, pk2] := by
+  native_decide
+
+/-- Bad input length ⇒ empty `ByteArray`. -/
+example : g1Neg ByteArray.empty = ByteArray.empty := by native_decide
+
 end LeanHazmatBlsTests.Vectors

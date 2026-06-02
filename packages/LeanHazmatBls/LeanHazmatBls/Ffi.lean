@@ -105,6 +105,24 @@ Runtime: `lean_hazmat_bls_eth_aggregate_pubkeys` (blst
 @[extern "lean_hazmat_bls_eth_aggregate_pubkeys"]
 opaque ethAggregatePubkeys (pubkeys : @& Array ByteArray) : ByteArray
 
+/-- `g1Add(a, b)` → the 48-byte compressed sum of two G1 public keys
+(the spec's `G1_to_bytes48(add(bytes48_to_G1 a, bytes48_to_G1 b))`).
+Returns the **empty** `ByteArray` on a wrong length / bad encoding. The
+result may be the point at infinity (`0xc0‖0×47`). Raw point op: no
+subgroup / identity check (validity is established via `verify`).
+
+Runtime: `lean_hazmat_bls_g1_add` (blst `blst_p1_add_or_double_affine`). -/
+@[extern "lean_hazmat_bls_g1_add"]
+opaque g1Add (a : @& ByteArray) (b : @& ByteArray) : ByteArray
+
+/-- `g1Neg(a)` → the 48-byte compressed negation of a G1 public key
+(the spec's `G1_to_bytes48(neg(bytes48_to_G1 a))`). Empty `ByteArray` on
+a wrong length / bad encoding.
+
+Runtime: `lean_hazmat_bls_g1_neg` (blst `blst_p1_cneg`). -/
+@[extern "lean_hazmat_bls_g1_neg"]
+opaque g1Neg (a : @& ByteArray) : ByteArray
+
 /-- `AggregateVerify(pubkeys, messages, signature)` → `Bool`, the
 distinct-message pairing check. `pubkeys` and `messages` must be the
 same non-zero length; `signature` is 96 bytes. Each pubkey is
