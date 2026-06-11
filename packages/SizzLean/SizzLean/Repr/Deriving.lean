@@ -79,9 +79,23 @@ can apply `PUnit`'s singleton-eta.
   an `Expr` (e.g. a field's type extracted from the projection
   function's signature) into something the macro-template antiquotation
   `$...` can splice into a generated `Syntax` tree.
-* `forallTelescopeReducing`: strips off pi-binders from a type,
-  exposing the body and the bound variables. Used here to peek
-  at a projection function's return type (= the field's type).
+* `Lean.PrettyPrinter.delab : Expr → … → TSyntax \`term`: the
+  *delaborator*, producing real surface syntax (named identifiers) for
+  an `Expr`. Preferred over `exprToSyntax` for any expression that
+  mentions a parameter free variable: `exprToSyntax` embeds the raw
+  `Expr`, which dangles once the handler's telescope closes, whereas
+  `delab` renders each fvar as its `userName`, which the emitted
+  instance re-binds. Both the symbolic cap and parameterised field
+  types go through `delab`.
+* `forallTelescopeReducing` / `forallBoundedTelescope`: strip pi-binders
+  from a type, exposing the body and the bound variables. The latter
+  stops after a fixed count; used here to open exactly the structure's
+  parameter binders so a `[Preset]`-generic container's instance is
+  parameterised the same way (`mkParamBinder` replays each binder).
+* `instantiateForall : Expr → Array Expr → MetaM Expr`: substitutes the
+  leading pi-binders of a type with given arguments. Used to feed the
+  open parameter fvars into each field projection's type so every field
+  refers to the same parameters.
 -/
 
 set_option autoImplicit false
@@ -91,6 +105,35 @@ namespace SizzLean.Repr.Deriving
 open SizzLean.Repr
 
 open Lean Elab Command Meta Term
+
+/-- Render a `Nat`-valued cap / length / width expression as shape
+Syntax, preferring a concrete literal but falling back to the
+*symbolic* expression when the value can't be evaluated yet.
+
+A container declared generic over a `[Preset]` instance carries field
+widths that are instance-resolved projections (`Const.validatorRegistryLimit`,
+`Preset.SYNC_COMMITTEE_SIZE …`), not `Nat` literals. The projection
+reduces to a literal only once the `[Preset]` instance is fixed (at the
+runner), so at derive time `evalNat` fails on it. The cap is just an
+argument to the shape descriptor (`SSZType.list`/`.bitlist`/`.bitvector`);
+the literal is an eager simplification, not a requirement. So:
+
+* `evalNat` succeeds (concrete cap): splice the literal. Keeps the
+  emitted shape a plain numeral, which is the common, fully-concrete
+  case and the one downstream `decide` / `native_decide` reductions
+  read most cleanly.
+* `evalNat` fails (symbolic cap): delaborate the cap *expression* to
+  surface syntax. The emitted instance is then `[Preset]`-generic; the
+  width reduces to a literal wherever the preset instance is pinned. -/
+private def capToShapeSyntax (cap : Expr) : TermElabM (TSyntax `term) := do
+  match ← Lean.Meta.evalNat (← Lean.Meta.whnf cap) |>.run with
+  | some capVal => return Syntax.mkNumLit (toString capVal)
+  -- Symbolic cap: delaborate to real surface syntax referencing the
+  -- preset parameter by name. `PrettyPrinter.delab` (not `exprToSyntax`)
+  -- is required because the cap mentions the structure's parameter
+  -- fvars; `exprToSyntax` embeds the raw `Expr`, which dangles once the
+  -- handler's telescope closes and re-elaborates as a metavariable.
+  | none        => Lean.PrettyPrinter.delab cap
 
 /-- Map a Lean type to its literal `SSZType` shape Syntax.
 
@@ -117,25 +160,19 @@ private partial def shapeForType (fieldTypeOrig : Expr) : TermElabM (TSyntax `te
   -- splice into the emitted shape, and `whnf` would unfold them to
   -- `Subtype`/`BitVec` and lose that head.
   if fieldTypeOrig.isAppOfArity ``SizzLean.Repr.Bitlist 1 then
-    let n := fieldTypeOrig.appArg!
-    let some nVal ← Lean.Meta.evalNat (← Lean.Meta.whnf n) |>.run
-      | throwError "deriving SSZRepr: cannot evaluate Bitlist cap '{n}' to a Nat literal"
-    let nSyn : TSyntax `term := Syntax.mkNumLit (toString nVal)
+    -- `Bitlist cap`: splice the cap, literal if concrete, else symbolic.
+    let nSyn ← capToShapeSyntax fieldTypeOrig.appArg!
     return ← `(SizzLean.Spec.SSZType.bitlist $nSyn)
   if fieldTypeOrig.isAppOfArity ``SizzLean.Repr.Bitvector 1 then
-    let n := fieldTypeOrig.appArg!
-    let some nVal ← Lean.Meta.evalNat (← Lean.Meta.whnf n) |>.run
-      | throwError "deriving SSZRepr: cannot evaluate Bitvector length '{n}' to a Nat literal"
-    let nSyn : TSyntax `term := Syntax.mkNumLit (toString nVal)
+    -- `Bitvector n`: splice the length, literal if concrete, else symbolic.
+    let nSyn ← capToShapeSyntax fieldTypeOrig.appArg!
     return ← `(SizzLean.Spec.SSZType.bitvector $nSyn)
   if fieldTypeOrig.isAppOfArity ``SizzLean.Repr.SSZList 2 then
-    -- `SSZList α cap`: recurse on `α`, splice the literal `cap`.
-    let cap := fieldTypeOrig.appArg!
+    -- `SSZList α cap`: recurse on `α`, splice the cap (literal if
+    -- concrete, else the symbolic preset-resolved expression).
     let α := fieldTypeOrig.appFn!.appArg!
     let αShape ← shapeForType α
-    let some capVal ← Lean.Meta.evalNat (← Lean.Meta.whnf cap) |>.run
-      | throwError "deriving SSZRepr: cannot evaluate SSZList cap '{cap}' to a Nat literal"
-    let capSyn : TSyntax `term := Syntax.mkNumLit (toString capVal)
+    let capSyn ← capToShapeSyntax fieldTypeOrig.appArg!
     return ← `(SizzLean.Spec.SSZType.list $αShape $capSyn)
   -- Otherwise reduce via `whnf` for abbrev newtypes (`Slot = UInt64`)
   -- and proceed with the primitive pattern checks.
@@ -183,28 +220,84 @@ private partial def shapeForType (fieldTypeOrig : Expr) : TermElabM (TSyntax `te
     | some _ =>
         let tySyn : TSyntax `term ← match fieldTypeOrig with
           | .const name _ => pure ⟨mkIdent name⟩
-          | _             => exprToSyntax fieldTypeOrig
+          -- `delab`, not `exprToSyntax`: a nested `[Preset]`-generic
+          -- field type mentions the parameter fvars, which `exprToSyntax`
+          -- would embed and leave dangling once the telescope closes.
+          | _             => Lean.PrettyPrinter.delab fieldTypeOrig
         `(@SizzLean.SSZRepr.shape $tySyn inferInstance)
     | none =>
         throwError "deriving SSZRepr: field type '{fieldTypeOrig}' is not directly recognised by the handler and has no `SSZRepr` instance in scope. Supported directly: Bool, UInt8/16/32/64, BitVec n, Vector α n. Other types must derive (or hand-write) their own `SSZRepr` instance first."
 
-/-- For each field of `declName`, return a pair: the literal `SSZType`
-shape Syntax (for the emitted `shape` field) and the field's Lean
-type Syntax (for the `fromRepr` input-type annotation). -/
+open Lean.Elab.Deriving in
+/-- Reproduce a structure parameter as a `bracketedBinder`, preserving
+its binder info (`{}` / `[]` / `()`) so the emitted instance is
+parameterised exactly like the structure. The binder name is the
+parameter's `userName`, which is also how the field-type Syntax below
+refers to it (delaboration renders an fvar by its `userName`), so the
+two line up by name on re-elaboration. Preserving `[]` for an instance
+parameter (e.g. `[Preset]`) is load-bearing: it keeps that parameter a
+*local instance* so the field shapes' preset-resolved projections and
+any nested `SSZRepr` synthesis still find it.
+
+`implicitBinderF` / `instBinderF` / `explicitBinderF` are Lean core's
+quotation aliases for the matching binder parsers (`Lean.Elab.Deriving`,
+the same ones core's own deriving handlers splice). A strict-implicit
+parameter (`⦃ ⦄`) degrades to a plain implicit binder; no SSZ structure
+declares one. -/
+private def mkParamBinder (x : Expr) :
+    TermElabM (TSyntax ``Lean.Parser.Term.bracketedBinder) := do
+  let decl ← x.fvarId!.getDecl
+  let nm := mkIdent decl.userName
+  let tyStx ← Lean.PrettyPrinter.delab decl.type
+  match decl.binderInfo with
+  | .instImplicit => return ⟨← `(instBinderF| [ $nm : $tyStx ])⟩
+  | .default      => return ⟨← `(explicitBinderF| ( $nm : $tyStx ))⟩
+  | _             => return ⟨← `(implicitBinderF| { $nm : $tyStx })⟩
+
+/-- Collect everything the emitted instance needs from `declName`'s
+fields and parameters:
+
+* `binders`: the structure's own parameter binders, replayed onto the
+  instance (empty for a non-parameterised structure).
+* `structApp`: the structure applied to those parameters (`@Decl p…`),
+  the type the instance is `SSZRepr`-for.
+* `shapes`: each field's `SSZType` shape Syntax.
+* `types`: each field's Lean type Syntax (for the `fromRepr` product).
+
+The work runs inside one `forallBoundedTelescope` over the parameters
+so every field type refers to the *same* parameter fvars, which
+`mkParamBinder` then re-binds by name. A `[Preset]`-generic container
+threads its preset instance through here, leaving each field's cap a
+symbolic projection until the instance is pinned. -/
 private def getFieldShapesAndTypes (declName : Name) :
-    TermElabM (Array (TSyntax `term) × Array (TSyntax `term)) := do
+    TermElabM (Array (TSyntax ``Lean.Parser.Term.bracketedBinder)
+              × TSyntax `term
+              × Array (TSyntax `term) × Array (TSyntax `term)) := do
   let env ← getEnv
+  let indVal ← getConstInfoInduct declName
   let fieldNames := getStructureFields env declName
-  let mut shapes : Array (TSyntax `term) := #[]
-  let mut types  : Array (TSyntax `term) := #[]
-  for fname in fieldNames do
-    let some info := getFieldInfo? env declName fname
-      | throwError "deriving SSZRepr: cannot find field info for {fname}"
-    let projInfo ← getConstInfo info.projFn
-    let fieldType ← forallTelescopeReducing projInfo.type fun _ body => pure body
-    types := types.push (← exprToSyntax fieldType)
-    shapes := shapes.push (← shapeForType fieldType)
-  return (shapes, types)
+  forallBoundedTelescope indVal.type indVal.numParams fun params _ => do
+    let binders ← params.mapM mkParamBinder
+    let paramIdents : Array Ident ← params.mapM fun p => do
+      return mkIdent (← p.fvarId!.getDecl).userName
+    let structApp ← `(@$(mkCIdent declName):ident $paramIdents:ident*)
+    let mut shapes : Array (TSyntax `term) := #[]
+    let mut types  : Array (TSyntax `term) := #[]
+    for fname in fieldNames do
+      let some info := getFieldInfo? env declName fname
+        | throwError "deriving SSZRepr: cannot find field info for {fname}"
+      let projInfo ← getConstInfo info.projFn
+      -- The projection's type is `∀ params (self : Decl params), FieldTy`.
+      -- Substitute the telescope's `params`, then strip the `self`
+      -- binder to expose `FieldTy` referring to those same fvars.
+      let projInst ← instantiateForall projInfo.type params
+      let fieldType ← forallTelescopeReducing projInst fun _ body => pure body
+      -- `delab`, not `exprToSyntax`: a parameterised field type refers
+      -- to the telescope's parameter fvars, which must survive as named
+      -- references once the telescope closes (same reason as the cap).
+      types := types.push (← Lean.PrettyPrinter.delab fieldType)
+      shapes := shapes.push (← shapeForType fieldType)
+    return (binders, structApp, shapes, types)
 
 /-- Build the `instance` command for `SSZRepr declName`. -/
 private def mkInstance (declName : Name) : CommandElabM Unit := do
@@ -218,7 +311,8 @@ private def mkInstance (declName : Name) : CommandElabM Unit := do
   -- and also extract the field's Lean type for the input-type
   -- annotation on `fromRepr`. See `getFieldShapesAndTypes`'s
   -- docstring for the dual role.
-  let (shapeExprs, fieldTypes) ← liftTermElabM <| getFieldShapesAndTypes declName
+  let (binders, structApp, shapeExprs, fieldTypes) ←
+    liftTermElabM <| getFieldShapesAndTypes declName
   -- Build the *unfolded* product type matching the shape's interp:
   -- `τ₁ × τ₂ × … × τₙ × PUnit`. Right-nested `Prod`, terminated by
   -- `PUnit`. This is the explicit type we pin `fromRepr`'s input
@@ -227,7 +321,6 @@ private def mkInstance (declName : Name) : CommandElabM Unit := do
   let mut interpTy : TSyntax `term ← `(PUnit)
   for ty in fieldTypes.reverse do
     interpTy ← `($ty × $interpTy)
-  let structIdent := mkIdent declName
   let fieldIdents := fieldNames.map mkIdent
   -- Build `toRepr` body: wraps each field through its inner
   -- `SSZRepr.toRepr` so the field-type-to-shape-interp iso composes.
@@ -272,9 +365,9 @@ private def mkInstance (declName : Name) : CommandElabM Unit := do
   let instIdent : Ident :=
     mkIdent (`_root_ ++ Name.mkSimple instLeafStr)
   let cmd ← `(
-    instance $instIdent:ident : SizzLean.SSZRepr $structIdent where
+    instance $instIdent:ident $binders:bracketedBinder* : SizzLean.SSZRepr $structApp where
       shape    := SizzLean.Spec.SSZType.container [$shapeExprs,*]
-      toRepr   := fun (s : $structIdent) => $toReprBody
+      toRepr   := fun (s : $structApp) => $toReprBody
       fromRepr := fun $fromReprPat:term =>
         { $[$fieldIdents:ident := $fromReprFields:term],* }
       to_from  := fun _ => by simp [SizzLean.SSZRepr.to_from]
