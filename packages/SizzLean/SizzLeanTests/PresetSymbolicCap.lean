@@ -84,6 +84,20 @@ structure Registry [P : Preset] where
   marker     : UInt64
 deriving DecidableEq, SSZRepr
 
+/-- A `[Preset]`-generic container with a symbolic-length **fixed `Vector`**
+field. Consensus `BeaconState` has many of these (`block_roots :
+Vector[Root, SLOTS_PER_HISTORICAL_ROOT]`), so the derive's `Vector` arm must
+splice the symbolic length the same way the variable-length collections do. -/
+structure FixedRegistry [P : Preset] where
+  roots  : Vector UInt64 (Const.validatorRegistryLimit (P := P))
+  marker : UInt64
+deriving DecidableEq, SSZRepr
+
+/-- The symbolic `Vector` length reduces to the literal at a concrete preset. -/
+example :
+    (SSZRepr.shape (T := @FixedRegistry testPreset))
+      = .container [.vector (.uintN 64) 8, .uintN 64] := rfl
+
 /-! ## The cap stays symbolic in the derived shape, concrete at a preset
 
 The derive above succeeded with no "cannot evaluate cap to a Nat
@@ -222,5 +236,79 @@ example :
     let t' := sszUpdate t with validators := grownList
     t'.hashTreeRoot =
       SSZ.hashTreeRoot Sha256 ({ r0 with validators := grownList } : @Registry testPreset) := rfl
+
+/-! ## Composite-element index writes over a symbolic cap (change 1)
+
+The fixtures above hold *basic-packed* element lists (`SSZList UInt64`),
+whose per-element write rebuilds the owning field (the `projDrop` path) and
+never needs the cap as a number. A *composite* element (its own Merkle
+subtree) is the case the old macro couldn't handle over a symbolic cap: the
+single-leaf gindex is `2 ^ chunkDepth cap + i`, and folding that base needed
+`evalNat` on the cap, which fails on a `[Preset]`-resolved width. The macro
+now splices the cap as a runtime gindex term (`capToTermSyntax`), so the
+write elaborates and, at a pinned preset, reduces to the same gindex the
+concrete-cap path produces. -/
+
+/-- A composite (non-packed) element: two `UInt64` fields, so it merkleizes
+to its own subtree instead of packing into a shared chunk. `Inhabited` is
+needed because a per-element index write projects the element via `[i]!`. -/
+structure Pair where
+  lo : UInt64
+  hi : UInt64
+deriving DecidableEq, Inhabited, SSZRepr
+
+/-- A `[Preset]`-generic container with a symbolic-cap `SSZList` of a
+*composite* element, the case change 1 unblocks. -/
+structure PairRegistry [P : Preset] where
+  pairs  : SSZList Pair (Const.validatorRegistryLimit (P := P))
+  marker : UInt64
+deriving DecidableEq, SSZRepr
+
+/-- The fixed-`Vector` analogue, exercising the macro's `Vector`
+composite-element arm over the same symbolic length. -/
+structure FixedPairRegistry [P : Preset] where
+  pairs  : Vector Pair (Const.validatorRegistryLimit (P := P))
+  marker : UInt64
+deriving DecidableEq, SSZRepr
+
+private def pr0 : @PairRegistry testPreset where
+  pairs  := ⟨#[⟨1, 2⟩, ⟨3, 4⟩, ⟨5, 6⟩], by decide⟩
+  marker := 0x1111
+
+private def fpr0 : @FixedPairRegistry testPreset where
+  pairs  := Vector.replicate (Const.validatorRegistryLimit (P := testPreset)) ⟨7, 8⟩
+  marker := 0x2222
+
+/-- Cached, `SSZList` composite element: the single-leaf write into the
+symbolic-cap list elaborates (it threw "cannot evaluate list cap to a Nat"
+before change 1) and its root matches the spec root of the directly-updated
+value. -/
+example :
+    let t : TreeBacked Sha256 (@PairRegistry testPreset) := TreeBacked.ofValue Sha256 pr0
+    let expected : @PairRegistry testPreset :=
+      { pr0 with pairs := pr0.pairs.set! 1 ⟨99, 88⟩ }
+    (sszUpdate t with pairs[1] := (⟨99, 88⟩ : Pair)).toOption.map (·.hashTreeRootCached.1)
+      = some (SSZ.hashTreeRoot Sha256 expected) := by
+  native_decide
+
+/-- Uncached, `SSZList` composite element: the plain view rewrite agrees with
+the spec root. -/
+example :
+    let t : UncachedSSZ Sha256 (@PairRegistry testPreset) := UncachedSSZ.ofValue Sha256 pr0
+    let expected : @PairRegistry testPreset :=
+      { pr0 with pairs := pr0.pairs.set! 2 ⟨42, 43⟩ }
+    (sszUpdate t with pairs[2] := (⟨42, 43⟩ : Pair)).toOption.map (·.hashTreeRoot)
+      = some (SSZ.hashTreeRoot Sha256 expected) := by
+  native_decide
+
+/-- Cached, `Vector` composite element: the macro's `Vector` arm splices the
+symbolic length the same way. -/
+example :
+    let t : TreeBacked Sha256 (@FixedPairRegistry testPreset) := TreeBacked.ofValue Sha256 fpr0
+    let expected : @FixedPairRegistry testPreset :=
+      { fpr0 with pairs := fpr0.pairs.set! 3 ⟨77, 66⟩ }
+    (sszUpdate t with pairs[3] := (⟨77, 66⟩ : Pair)).toOption.map (·.hashTreeRootCached.1)
+      = some (SSZ.hashTreeRoot Sha256 expected) := by
+  native_decide
 
 end SizzLeanTests.PresetSymbolicCap

@@ -205,13 +205,58 @@ instance {α : Type} [Inhabited α] {cap : Nat} :
     GetElem (SSZList α cap) Nat α (fun _ _ => True) where
   getElem xs i _ := xs.val[i]!
 
+/-! ### Default / ordering / hashing for the capped collection types
+
+`SSZList` and `Bitlist` are `Subtype`s over `Array`, so Lean derives
+nothing for them on its own. The instances below give the variable-length
+SSZ collections the same `Inhabited` / `Ord` / `Hashable` surface the
+fixed-length types (`Vector`, `Bitvector`) already carry, so a derived
+container whose fields are all SSZ types picks these up for free (a
+container used as a finite-map key needs `Ord` / `Hashable`; the runner's
+genesis anchor needs `Inhabited`).
+
+The empty collection is the canonical default, so the instance belongs with
+the type, not in a downstream consumer. `Ord` is lexicographic over the
+underlying array and `Hashable` folds the element hashes, both deferring to
+`Array`'s own instances. `SSZList`'s element-aware variants require the
+matching instance on `α`; `Bitlist`'s element is `Bool`, which has both. -/
+
+/-- `Inhabited (SSZList α cap)`: the empty list, whose size `0` is below
+any cap. -/
+instance instInhabitedSSZList {α : Type} {cap : Nat} : Inhabited (SSZList α cap) :=
+  ⟨⟨#[], Nat.zero_le _⟩⟩
+
+/-- `Inhabited (Bitlist cap)`: the empty bit list. -/
+instance instInhabitedBitlist {cap : Nat} : Inhabited (Bitlist cap) :=
+  ⟨⟨#[], Nat.zero_le _⟩⟩
+
+/-- `Ord (SSZList α cap)`: lexicographic over the underlying array. -/
+instance instOrdSSZList {α : Type} {cap : Nat} [Ord α] : Ord (SSZList α cap) where
+  compare a b := compare a.val b.val
+
+/-- `Hashable (SSZList α cap)`: folds the element hashes of the array. -/
+instance instHashableSSZList {α : Type} {cap : Nat} [Hashable α] : Hashable (SSZList α cap) where
+  hash a := hash a.val
+
+/-- `Ord (Bitlist cap)`: lexicographic over the underlying bit array. -/
+instance instOrdBitlist {cap : Nat} : Ord (Bitlist cap) where
+  compare a b := compare a.val b.val
+
+/-- `Hashable (Bitlist cap)`: folds the bit hashes of the array. -/
+instance instHashableBitlist {cap : Nat} : Hashable (Bitlist cap) where
+  hash a := hash a.val
+
 /-- SSZ `Bitvector[n]`: fixed-length bit vector. Distinct nominal
 type from `BitVec n` so the SSZRepr resolves to the bit-packed
 `.bitvector n` shape (not the LE-uint `.uintN n` shape that
 `BitVec 128/256` resolve to). -/
+-- `Inhabited` (all-zero), `Ord` (numeric, via `BitVec`'s own `Ord`), and
+-- `Hashable` ride directly off the single `BitVec n` field, so a derived
+-- container with a `Bitvector` field (e.g. `BeaconState.justificationBits`)
+-- inherits all three. `Vector` already carries them from its components.
 structure Bitvector (n : Nat) where
   data : BitVec n
-  deriving DecidableEq
+  deriving DecidableEq, Inhabited, Ord, Hashable
 
 instance instSSZReprBitlist {cap : Nat} : SSZRepr (Bitlist cap) where
   shape    := .bitlist cap

@@ -200,13 +200,15 @@ private partial def shapeForType (fieldTypeOrig : Expr) : TermElabM (TSyntax `te
     `(SizzLean.Spec.SSZType.uintN $nSyn)
   else if fieldType.isAppOfArity ``Vector 2 then
     -- `Vector α n` → `.vector (shape α) n`. Recurse on `α`; extract
-    -- the literal `n` value the same way as the `BitVec` arm.
+    -- the length `n` through `capToShapeSyntax`: a literal when concrete, the
+    -- symbolic preset-resolved expression otherwise. A `[Preset]`-parameterised
+    -- container's fixed-length fields (`Vector Root SLOTS_PER_HISTORICAL_ROOT`,
+    -- …) are exactly this symbolic case, so the same splice the variable-length
+    -- collections use must cover `Vector` too.
     let n := fieldType.appArg!
     let α := fieldType.appFn!.appArg!
     let αShape ← shapeForType α
-    let some nVal ← Lean.Meta.evalNat (← Lean.Meta.whnf n) |>.run
-      | throwError "deriving SSZRepr: cannot evaluate Vector length '{n}' to a literal Nat"
-    let nSyn : TSyntax `term := Syntax.mkNumLit (toString nVal)
+    let nSyn ← capToShapeSyntax n
     `(SizzLean.Spec.SSZType.vector $αShape $nSyn)
   else
     -- Fallback: try synthesising a `SSZRepr` instance for `fieldType`

@@ -17,10 +17,12 @@ set_option autoImplicit false
 namespace SizzLean.Cache
 
 /-- The only way an index-form `sszGet`/`sszUpdate` can fail: the index
-is out of range for the field's current length. Carries no payload,
-there is a single failure mode. -/
+is out of range for the field's current length. Carries the offending
+`idx` and the owner's current `bound` (its length at access time) so a
+consumer lifting the miss reports the real numbers rather than a bare
+"out of range". The reject fires when `idx ≥ bound`. -/
 inductive IndexError where
-  | indexError
+  | indexError (idx bound : Nat)
   deriving Repr, DecidableEq
 
 end SizzLean.Cache
