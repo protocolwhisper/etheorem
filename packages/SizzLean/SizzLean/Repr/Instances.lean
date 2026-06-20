@@ -192,18 +192,56 @@ abbrev SSZList.set! {α : Type} {cap : Nat}
       simp [Array.set!_eq_setIfInBounds]
     rw [h]; exact xs.property⟩
 
-/-- `GetElem` instance for `SSZList`: makes `xs[i]!` / `xs[i]?` work
-on the user-facing list type. The `(fun _ _ => True)` validity
-predicate means `xs[i]` (without `!`/`?`) requires no explicit
-in-bounds proof; mis-bounded access falls through to `Array`'s
-own bang/option semantics (`default` or `none`). The macro
-`sszUpdate`'s cached-path closure emission relies on this for its
-projection chain. Bracket-bang `xs[i]!` is the same syntax
-`Vector` already supports, so the macro doesn't need type-aware
-dispatch between the two. -/
+/-- `GetElem` instance for `SSZList`, with the faithful validity predicate
+`fun xs i => i < xs.size`. So the three element reads behave like `Array`'s:
+`xs[i]?` is a real bounds check (`none` past the end), `xs[i]!` returns the
+element type's `default` past the end, and `xs[i]'h` reads with an in-bounds
+proof. The everyday reads are `xs[i]!` (total) and `xs[i]?` (option).
+
+The `sszUpdate` / `sszGet` macros never emit a bare `xs[i]`: writes go through
+`SSZList.set!`, reads through `[i]!`, and bounds through `.size`. None of those
+need a proof at the index, so the faithful predicate costs the macros nothing.
+`xs[i]!` is also the same syntax `Vector` supports, so the macro needs no
+type-aware dispatch. -/
 instance {α : Type} [Inhabited α] {cap : Nat} :
-    GetElem (SSZList α cap) Nat α (fun _ _ => True) where
-  getElem xs i _ := xs.val[i]!
+    GetElem (SSZList α cap) Nat α (fun xs i => i < xs.size) where
+  getElem xs i h := xs.val[i]'h
+
+/-! ### Element-collection surface for `SSZList` / `Bitlist`
+
+These let a caller work an `SSZList` (or `Bitlist`) without projecting through the
+subtype's `.val`. They delegate to the underlying `Array`, so they reduce away cleanly.
+Element reads use the `GetElem` forms above: `xs[i]!` (total, `default` past the end)
+and `xs[i]?` (option, `none` past the end). -/
+
+/-- The elements as an `Array`. -/
+abbrev SSZList.toArray {α : Type} {cap : Nat} (xs : SSZList α cap) : Array α := xs.val
+/-- The elements as a `List`. -/
+abbrev SSZList.toList {α : Type} {cap : Nat} (xs : SSZList α cap) : List α := xs.val.toList
+/-- Left fold over the elements. -/
+abbrev SSZList.foldl {α β : Type} {cap : Nat} (f : β → α → β) (init : β) (xs : SSZList α cap) : β := xs.val.foldl f init
+/-- Map the elements to an `Array`. -/
+abbrev SSZList.map {α β : Type} {cap : Nat} (f : α → β) (xs : SSZList α cap) : Array β := xs.val.map f
+/-- Whether any element satisfies `p`. -/
+abbrev SSZList.any {α : Type} {cap : Nat} (xs : SSZList α cap) (p : α → Bool) : Bool := xs.val.any p
+/-- Whether every element satisfies `p`. -/
+abbrev SSZList.all {α : Type} {cap : Nat} (xs : SSZList α cap) (p : α → Bool) : Bool := xs.val.all p
+/-- First index whose element satisfies `p`. -/
+abbrev SSZList.findIdx? {α : Type} {cap : Nat} (xs : SSZList α cap) (p : α → Bool) : Option Nat := xs.val.findIdx? p
+/-- Membership test. -/
+abbrev SSZList.contains {α : Type} {cap : Nat} [BEq α] (xs : SSZList α cap) (a : α) : Bool := xs.val.contains a
+/-- `for x in xs` iterates the elements. -/
+instance {m : Type → Type} [Monad m] {α : Type} {cap : Nat} : ForIn m (SSZList α cap) α where
+  forIn xs b f := ForIn.forIn xs.val b f
+
+/-- Runtime length of a `Bitlist`. -/
+abbrev Bitlist.size {cap : Nat} (bs : Bitlist cap) : Nat := bs.val.size
+/-- The bits as an `Array Bool`. -/
+abbrev Bitlist.toArray {cap : Nat} (bs : Bitlist cap) : Array Bool := bs.val
+/-- `GetElem` for `Bitlist`, faithful (validity `fun bs i => i < bs.size`): `bs[i]?`
+is `none` past the end, `bs[i]!` is `false` past the end. Matches `SSZList`'s instance. -/
+instance {cap : Nat} : GetElem (Bitlist cap) Nat Bool (fun bs i => i < bs.size) where
+  getElem bs i h := bs.val[i]'h
 
 /-! ### Default / ordering / hashing for the capped collection types
 

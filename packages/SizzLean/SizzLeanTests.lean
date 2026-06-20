@@ -11,6 +11,7 @@ import SizzLeanTests.PendingListShrink
 import SizzLeanTests.WidthsAndLists
 import SizzLeanTests.PresetSymbolicCap
 import SizzLeanTests.CollectionInstances
+import SizzLeanTests.ElementSurface
 import SizzLeanTests.IndexErrorPayload
 import SizzLeanTests.InfallibleIndex
 import SizzLeanTests.Sha256BatchEquivalence
